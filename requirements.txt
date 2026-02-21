@@ -1,0 +1,9 @@
+fastapi[standard]
+uvicorn[standard]
+SQLAlchemy>=1.4
+psycopg2-binary
+pydantic[email]
+python-dotenv
+bcrypt==4.3.0
+alembic
+PyJWT

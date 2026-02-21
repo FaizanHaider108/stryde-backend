@@ -1,0 +1,36 @@
+from enum import Enum
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+
+
+class RunnerType(str, Enum):
+    grinder = "grinder"
+    social_stryder = "social stryder"
+    goal_crusher = "goal crusher"
+    flow_chaser = "flow chaser"
+
+
+class UserCreate(BaseModel):
+    full_name: str
+    email: EmailStr
+    password: str
+    runner_type: RunnerType
+
+class UserSignIn(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserOut(BaseModel):
+    uid: str
+    full_name: str
+    email: EmailStr
+    runner_type: RunnerType
+
+    class Config:
+        orm_mode = True
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
