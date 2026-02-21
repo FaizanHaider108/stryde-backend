@@ -1,9 +1,24 @@
 from fastapi import FastAPI
-from .lib.db import engine, Base
+from fastapi.middleware.cors import CORSMiddleware
+
 from .api.v1 import auth as auth_router
+from .lib.db import Base, engine
 
 app = FastAPI(title="Stryde Backend")
 
+# CORS: allow local frontend during development
+origins = [
+	"http://localhost:3000",
+	"http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+	CORSMiddleware,
+	allow_origins=origins,
+	allow_credentials=True,
+	allow_methods=["*"],
+	allow_headers=["*"],
+)
 
 def _create_tables():
 	# Import models so they are registered on Base.metadata
