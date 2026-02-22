@@ -1,3 +1,7 @@
+"""Club models: Club and ClubMember (association object).
+
+Grouped attributes: primary keys, columns, timestamps, then relationships.
+"""
 import enum
 import uuid
 
@@ -6,49 +10,56 @@ from sqlalchemy.orm import relationship
 
 from ..lib.db import Base
 
-# Define the hierarchy of roles within a club
+
 class ClubRole(str, enum.Enum):
+    """Role of a user within a club."""
     owner = "owner"
     admin = "admin"
     member = "member"
 
-# This sits between User and Club to store the specific 'role' and 'joined_at' data
+
 class ClubMember(Base):
+    """Association object between `Club` and `User` storing membership metadata.
+
+    Columns are grouped as: foreign keys, metadata, timestamps, relationships.
+    """
     __tablename__ = "club_members"
 
+    # Foreign keys (composite primary key)
     club_id = Column(Uuid, ForeignKey("clubs.id", ondelete="CASCADE"), primary_key=True)
     user_id = Column(Uuid, ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True)
-    
-    # Extra data stored on the relationship itself!
+
+    # Membership metadata
     role = Column(Enum(ClubRole), default=ClubRole.member, nullable=False)
+
+    # Timestamps
     joined_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Relationships back to the parent tables
+    # Relationships
     club = relationship("Club", back_populates="members")
     user = relationship("User", back_populates="clubs")
 
 
-# Club Model - Represents a running club/community that users can join
 class Club(Base):
+    """A running club/community that users can join.
+
+    Layout: primary key, descriptive columns, timestamps, relationships.
+    """
     __tablename__ = "clubs"
 
+    # Primary key
     id = Column(Uuid, primary_key=True, index=True, default=uuid.uuid4)
+
+    # Descriptive fields
     name = Column(String, nullable=False, index=True)
-    description = Column(Text, nullable=True) # Text is better than String for long descriptions
-    image_url = Column(String, nullable=True) # The icon/banner
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    # Relationships
-    # This points to the Association Object, NOT directly to the User.
-    # cascade="all, delete-orphan" means if the club is deleted, all memberships are erased.
-    members = relationship("ClubMember", back_populates="club", cascade="all, delete-orphan")
-    
-    # A club can host many events.
-    events = relationship("Event", back_populates="club", cascade="all, delete-orphan")
+    description = Column(Text, nullable=True)
+    image_url = Column(String, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
+
+    # Relationships
+    # Use an association object for members so we can store role/joined_at
+    members = relationship("ClubMember", back_populates="club", cascade="all, delete-orphan")
+    events = relationship("Event", back_populates="club", cascade="all, delete-orphan")

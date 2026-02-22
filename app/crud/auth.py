@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from ..lib.security import get_password_hash, verify_password
 from ..models.user import AuthProvider, PersonalInfo, RunnerType, User
 from ..schemas.profile import PersonalInfoCreate, PersonalInfoUpdate
-from ..schemas.user import UserCreate
+from ..schemas.auth import UserCreate
 
 
 def get_user_by_email(db: Session, email: str):
