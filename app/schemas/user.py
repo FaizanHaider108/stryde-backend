@@ -1,7 +1,7 @@
 from enum import Enum
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from .personal_info import PersonalInfoOut
+from .profile import PersonalInfoOut
 
 class RunnerType(str, Enum):
     grinder = "grinder"

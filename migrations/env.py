@@ -10,6 +10,14 @@ import os
 
 from app.lib.db import Base
 import app.models.user
+import app.models.route
+import app.models.race
+import app.models.post
+import app.models.event
+import app.models.plan
+import app.models.experience
+import app.models.club
+import app.models.run
 
 load_dotenv()
 

@@ -14,7 +14,6 @@ class Gender(str, Enum):
 class PersonalInfoCreate(BaseModel):
     profile_image: Optional[str] = None
     full_name: str
-    email: EmailStr
     date_of_birth: Optional[date] = None
     gender: Optional[Gender] = None
     height: Optional[float] = None
@@ -24,7 +23,6 @@ class PersonalInfoCreate(BaseModel):
 class PersonalInfoUpdate(BaseModel):
     profile_image: Optional[str] = None
     full_name: Optional[str] = None
-    email: Optional[EmailStr] = None
     date_of_birth: Optional[date] = None
     gender: Optional[Gender] = None
     height: Optional[float] = None
