@@ -1,4 +1,5 @@
 from enum import Enum
+import uuid
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from .profile import PersonalInfoOut
@@ -24,7 +25,7 @@ class UserSignIn(BaseModel):
 
 
 class UserOut(BaseModel):
-    uid: str
+    uid: uuid.UUID
     full_name: str
     email: EmailStr
     runner_type: RunnerType

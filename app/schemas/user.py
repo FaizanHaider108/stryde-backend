@@ -1,36 +1,73 @@
-from enum import Enum
-from pydantic import BaseModel, EmailStr
-from typing import Optional
+```python
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import date
 
 
-cla.profilestr, Enum):
-    grinder = "grinder"
-    social_stryder = "social stryder"
-    goal_crusher = "goal crusher"
-    flow_chaser = "flow chaser"
+class ExperienceCreate(BaseModel):
+    title: str
+    year: int
 
 
-class UserCreate(BaseModel):
-    full_name: str
-    email: EmailStr
-    password: str
-    runner_type: RunnerType
+class UserUpdate(BaseModel):
+    location: Optional[str] = None
+    bio_title: Optional[str] = None
+    profile_image: Optional[str] = None
+    height: Optional[float] = None
+    weight: Optional[float] = None
+    runner_type: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
 
-class UserSignIn(BaseModel):
-    email: EmailStr
-    password: str
 
-
-class UserOut(BaseModel):
+class UserResponse(BaseModel):
     uid: str
     full_name: str
-    email: EmailStr
-    runner_type: RunnerType
+    profile_image: Optional[str] = None
+    runner_type: Optional[str] = None
+    bio_title: Optional[str] = None
 
     class Config:
         orm_mode = True
 
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+class UserStatsResponse(BaseModel):
+    uid: str
+    record_5k: Optional[str] = None
+    record_10k: Optional[str] = None
+    record_half_marathon: Optional[str] = None
+    record_marathon: Optional[str] = None
+    longest_run_distance: Optional[float] = None
+    fastest_mile_pace: Optional[str] = None
+    total_distance: Optional[float] = None
+    total_runs: Optional[int] = None
+    total_time: Optional[int] = None
+    average_pace: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class RunningExperience(BaseModel):
+    title: str
+    year: int
+
+
+class UserResumeResponse(BaseModel):
+    uid: str
+    email: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
+    height: Optional[float] = None
+    weight: Optional[float] = None
+    location: Optional[str] = None
+    total_marathons: Optional[int] = None
+    total_half_marathons: Optional[int] = None
+    years_running: Optional[int] = None
+    longest_run_distance: Optional[float] = None
+    experiences: Optional[List[RunningExperience]] = []
+
+    class Config:
+        orm_mode = True
+
+```
