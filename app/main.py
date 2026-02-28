@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.v1 import auth as auth_router
 from .api.v1 import profile as profile_router
+from .api.v1 import club as club_router
 from .lib.db import Base, engine
 
 app = FastAPI(title="Stryde Backend")
@@ -33,6 +34,7 @@ def on_startup():
 	_create_tables()
 	app.include_router(auth_router.router)
 	app.include_router(profile_router.router)
+	app.include_router(club_router.router)
 
 
 @app.get("/")

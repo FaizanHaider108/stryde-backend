@@ -1,16 +1,23 @@
+import uuid
 from math import floor
 from typing import Optional
 
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from ..models.user import User
-from ..schemas.profile import PersonalInfoOut, PersonalInfoUpdate
-from sqlalchemy.orm import Session
-import uuid
-from ..schemas.profile import SimpleUser, ProfileWithSocialOut
+from ..schemas.profile import (
+    PersonalInfoOut, 
+    PersonalInfoUpdate, 
+    SimpleUser, 
+    ProfileWithSocialOut
+)
 
+# --- Conversion Helpers ---
 
 def convert_height_meters_to_imperial(height_meters: Optional[float]) -> tuple[Optional[int], Optional[float]]:
+    """Converts meters to a (feet, inches) tuple."""
     if height_meters is None:
         return None, None
     total_inches = height_meters / 0.0254
@@ -20,14 +27,19 @@ def convert_height_meters_to_imperial(height_meters: Optional[float]) -> tuple[O
 
 
 def convert_weight_kg_to_pounds(weight_kg: Optional[float]) -> Optional[float]:
+    """Converts kilograms to pounds."""
     if weight_kg is None:
         return None
     return round(weight_kg * 2.20462262, 2)
 
 
+# --- Profile Logic ---
+
 def update_profile(db: Session, user: User, update_in: PersonalInfoUpdate) -> User:
+    """Updates user profile fields and converts height/weight to metric for storage."""
     data = update_in.dict(exclude_unset=True)
 
+    # Basic field updates
     if "full_name" in data:
         user.full_name = data["full_name"]
     if "profile_image_s3_key" in data:
@@ -43,16 +55,26 @@ def update_profile(db: Session, user: User, update_in: PersonalInfoUpdate) -> Us
     if update_in.weight:
         user.weight = update_in.weight.to_kilograms()
 
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not update profile due to a database integrity error."
+        ) from exc
+        
     return user
 
 
 def build_profile_response(user: User) -> PersonalInfoOut:
+    """Constructs the standard profile response with both metric and imperial units."""
     height_m = user.height
     height_cm = round(height_m * 100, 2) if height_m is not None else None
     height_ft, height_in = convert_height_meters_to_imperial(height_m)
+    
     weight_kg = user.weight
     weight_lb = convert_weight_kg_to_pounds(weight_kg)
 
@@ -72,50 +94,81 @@ def build_profile_response(user: User) -> PersonalInfoOut:
     )
 
 
+# --- Social & Follower Logic ---
+
 def _simple_user_from_model(u: User) -> SimpleUser:
-    return SimpleUser(uid=str(u.uid), full_name=u.full_name, profile_image_s3_key=u.profile_image_s3_key)
+    """Internal helper to convert a User model to a SimpleUser schema."""
+    return SimpleUser(
+        uid=str(u.uid), 
+        full_name=u.full_name, 
+        profile_image_s3_key=u.profile_image_s3_key
+    )
 
 
 def follow_user(db: Session, follower: User, target_uid: str) -> User:
+    """Establishes a follow relationship between two users."""
     if str(follower.uid) == target_uid:
-        raise ValueError("cannot follow oneself")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="You cannot follow yourself."
+        )
 
     try:
         target_id = uuid.UUID(target_uid)
-    except Exception:
-        raise ValueError("invalid target uid")
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Invalid target user ID format."
+        )
 
     target = db.query(User).filter(User.uid == target_id).first()
     if not target:
-        raise ValueError("target user not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="The user you are trying to follow does not exist."
+        )
 
-    # already following?
-    if target in follower.following:
-        return target
+    # Check if already following to prevent duplicates
+    if target not in follower.following:
+        follower.following.append(target)
+        try:
+            db.commit()
+            db.refresh(follower)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Error establishing follow relationship."
+            )
 
-    follower.following.append(target)
-    db.add(follower)
-    db.commit()
-    db.refresh(follower)
     return target
 
 
 def unfollow_user(db: Session, follower: User, target_uid: str) -> User:
+    """Removes a follow relationship between two users."""
     if str(follower.uid) == target_uid:
-        raise ValueError("cannot unfollow oneself")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="You cannot unfollow yourself."
+        )
 
     try:
         target_id = uuid.UUID(target_uid)
-    except Exception:
-        raise ValueError("invalid target uid")
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Invalid target user ID format."
+        )
 
     target = db.query(User).filter(User.uid == target_id).first()
     if not target:
-        raise ValueError("target user not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="The user you are trying to unfollow does not exist."
+        )
 
     if target in follower.following:
         follower.following.remove(target)
-        db.add(follower)
         db.commit()
         db.refresh(follower)
 
@@ -123,6 +176,7 @@ def unfollow_user(db: Session, follower: User, target_uid: str) -> User:
 
 
 def build_profile_with_social(user: User) -> ProfileWithSocialOut:
+    """Constructs a full profile response including follower/following lists and counts."""
     base = build_profile_response(user)
 
     followers = [_simple_user_from_model(u) for u in user.followers]

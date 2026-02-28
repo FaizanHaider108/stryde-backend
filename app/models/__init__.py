@@ -1,5 +1,6 @@
 from .user import User, RunnerType, followers
 from .club import Club, ClubMember, ClubRole
+from .invitation import ClubInvitation, InvitationStatus
 from .route import Route
 from .run import Run
 from .post import Post, PostImage, Comment, post_likes, comment_likes

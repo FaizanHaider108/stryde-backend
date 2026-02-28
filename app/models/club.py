@@ -5,7 +5,7 @@ Grouped attributes: primary keys, columns, timestamps, then relationships.
 import enum
 import uuid
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Enum, Text, func, Uuid
+from sqlalchemy import Column, String, DateTime, ForeignKey, Enum, Text, func, Uuid, Boolean
 from sqlalchemy.orm import relationship
 
 from ..lib.db import Base
@@ -58,8 +58,30 @@ class Club(Base):
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    # Soft-delete flag
+    is_deleted = Column(Boolean, nullable=False, server_default="false")
 
     # Relationships
     # Use an association object for members so we can store role/joined_at
-    members = relationship("ClubMember", back_populates="club", cascade="all, delete-orphan")
-    events = relationship("Event", back_populates="club", cascade="all, delete-orphan")
+    # Relationships
+    members = relationship(
+        "ClubMember", 
+        back_populates="club", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+    
+    events = relationship(
+        "Event", 
+        back_populates="club", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    # Adding the invitations relationship explicitly
+    invitations = relationship(
+        "ClubInvitation",
+        back_populates="club",
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
