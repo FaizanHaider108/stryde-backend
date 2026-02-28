@@ -123,3 +123,22 @@ class PersonalInfoOut(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class SimpleUser(BaseModel):
+    uid: str
+    full_name: str
+    profile_image_s3_key: Optional[str]
+
+    class Config:
+        orm_mode = True
+
+
+class ProfileWithSocialOut(PersonalInfoOut):
+    follower_count: int
+    following_count: int
+    followers: list[SimpleUser] = []
+    following: list[SimpleUser] = []
+
+    class Config:
+        orm_mode = True

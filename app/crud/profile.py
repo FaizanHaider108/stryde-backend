@@ -5,6 +5,9 @@ from sqlalchemy.orm import Session
 
 from ..models.user import User
 from ..schemas.profile import PersonalInfoOut, PersonalInfoUpdate
+from sqlalchemy.orm import Session
+import uuid
+from ..schemas.profile import SimpleUser, ProfileWithSocialOut
 
 
 def convert_height_meters_to_imperial(height_meters: Optional[float]) -> tuple[Optional[int], Optional[float]]:
@@ -66,4 +69,69 @@ def build_profile_response(user: User) -> PersonalInfoOut:
         height_in=height_in,
         weight_kg=weight_kg,
         weight_lb=weight_lb,
+    )
+
+
+def _simple_user_from_model(u: User) -> SimpleUser:
+    return SimpleUser(uid=str(u.uid), full_name=u.full_name, profile_image_s3_key=u.profile_image_s3_key)
+
+
+def follow_user(db: Session, follower: User, target_uid: str) -> User:
+    if str(follower.uid) == target_uid:
+        raise ValueError("cannot follow oneself")
+
+    try:
+        target_id = uuid.UUID(target_uid)
+    except Exception:
+        raise ValueError("invalid target uid")
+
+    target = db.query(User).filter(User.uid == target_id).first()
+    if not target:
+        raise ValueError("target user not found")
+
+    # already following?
+    if target in follower.following:
+        return target
+
+    follower.following.append(target)
+    db.add(follower)
+    db.commit()
+    db.refresh(follower)
+    return target
+
+
+def unfollow_user(db: Session, follower: User, target_uid: str) -> User:
+    if str(follower.uid) == target_uid:
+        raise ValueError("cannot unfollow oneself")
+
+    try:
+        target_id = uuid.UUID(target_uid)
+    except Exception:
+        raise ValueError("invalid target uid")
+
+    target = db.query(User).filter(User.uid == target_id).first()
+    if not target:
+        raise ValueError("target user not found")
+
+    if target in follower.following:
+        follower.following.remove(target)
+        db.add(follower)
+        db.commit()
+        db.refresh(follower)
+
+    return target
+
+
+def build_profile_with_social(user: User) -> ProfileWithSocialOut:
+    base = build_profile_response(user)
+
+    followers = [_simple_user_from_model(u) for u in user.followers]
+    following = [_simple_user_from_model(u) for u in user.following]
+
+    return ProfileWithSocialOut(
+        **base.dict(),
+        follower_count=len(followers),
+        following_count=len(following),
+        followers=followers,
+        following=following,
     )
