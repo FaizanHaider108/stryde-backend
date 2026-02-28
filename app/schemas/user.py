@@ -1,4 +1,3 @@
-```python
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date
@@ -12,7 +11,7 @@ class ExperienceCreate(BaseModel):
 class UserUpdate(BaseModel):
     location: Optional[str] = None
     bio_title: Optional[str] = None
-    profile_image: Optional[str] = None
+    profile_image_s3_key: Optional[str] = None
     height: Optional[float] = None
     weight: Optional[float] = None
     runner_type: Optional[str] = None
@@ -23,7 +22,7 @@ class UserUpdate(BaseModel):
 class UserResponse(BaseModel):
     uid: str
     full_name: str
-    profile_image: Optional[str] = None
+    profile_image_s3_key: Optional[str] = None
     runner_type: Optional[str] = None
     bio_title: Optional[str] = None
 
@@ -69,5 +68,3 @@ class UserResumeResponse(BaseModel):
 
     class Config:
         orm_mode = True
-
-```

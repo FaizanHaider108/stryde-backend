@@ -64,7 +64,8 @@ class User(Base):
     auth_provider = Column(Enum(AuthProvider), default=AuthProvider.credentials, nullable=False)
 
     # Profile fields
-    profile_image = Column(String, nullable=True)
+    # Image: store storage key only (URL derived externally)
+    profile_image_s3_key = Column(String, nullable=True)
     runner_type = Column(Enum(RunnerType), nullable=False)
     date_of_birth = Column(Date, nullable=True)
     gender = Column(Enum(Gender), nullable=True)
@@ -87,6 +88,15 @@ class User(Base):
         primaryjoin=uid == followers.c.follower_id,
         secondaryjoin=uid == followers.c.followed_id,
         back_populates="followers",
+    )
+
+    # Reciprocal relation: users who follow this user
+    followers = relationship(
+        "User",
+        secondary=followers,
+        primaryjoin=uid == followers.c.followed_id,
+        secondaryjoin=uid == followers.c.follower_id,
+        back_populates="following",
     )
 
     # Relationships to other models (grouped for readability)

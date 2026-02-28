@@ -7,3 +7,4 @@ python-dotenv
 bcrypt==4.3.0
 alembic
 PyJWT
+testcontainers
