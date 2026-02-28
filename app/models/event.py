@@ -4,7 +4,7 @@ Fields are grouped: PK, foreign keys, attributes, timestamps, then relationships
 """
 import enum
 import uuid
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Uuid, Table, Enum, func
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Uuid, Table, Enum, func, Boolean
 from sqlalchemy.orm import relationship
 from ..lib.db import Base
 
@@ -47,6 +47,9 @@ class Event(Base):
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Soft-delete flag
+    is_deleted = Column(Boolean, nullable=False, server_default="false")
 
     # Relationships
     club = relationship("Club", back_populates="events")
