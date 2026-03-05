@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import HTTPException, status
 
-from ..models import Event, EventInvitation, Club, ClubMember, ClubRole, User, InvitationStatus
+from ..models import Event, EventInvitation, Club, ClubMember, ClubRole, User, InvitationStatus, Route
 from ..schemas.event import EventCreate
 
 
@@ -19,6 +19,15 @@ def create_event(db: Session, creator: User, club: Club, payload: EventCreate) -
     if not owner_membership or owner_membership.role != ClubRole.owner:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only club owner can create events")
 
+    if not payload.route_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="route_id is required")
+
+    route = db.query(Route).filter(Route.id == payload.route_id).first()
+    if not route:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="route not found")
+    if route.creator_id != creator.uid:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Route does not belong to user")
+    
     event = Event(
         club_id=club.id,
         creator_id=creator.uid,

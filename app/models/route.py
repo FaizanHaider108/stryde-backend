@@ -1,8 +1,21 @@
 """Route model representing a saved/created route with geometry and tags."""
+import enum
 import uuid
-from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Boolean, func, Uuid
+from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Boolean, func, Uuid, Enum
 from sqlalchemy.orm import relationship
 from ..lib.db import Base
+
+class EnvironmentEnum(str, enum.Enum):
+    max_shade = "maximum shade"
+    open_air = "open air"
+
+class TerrainEnum(str, enum.Enum):
+    paved = "paved"
+    unpaved = "unpaved"
+
+class ElevationProfileEnum(str, enum.Enum):
+    flat = "flat"
+    hilly = "hilly"
 
 
 class Route(Base):
@@ -34,9 +47,9 @@ class Route(Base):
     # Geometry and tags
     map_data = Column(String, nullable=False)
     avoid_pollution = Column(Boolean, default=False)
-    environment = Column(String, nullable=True)
-    terrain = Column(String, nullable=True)
-    elevation_profile = Column(String, nullable=True)
+    environment = Column(Enum(EnvironmentEnum), nullable=True)
+    terrain = Column(Enum(TerrainEnum), nullable=True)
+    elevation_profile = Column(Enum(ElevationProfileEnum), nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())

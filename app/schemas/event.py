@@ -7,7 +7,6 @@ from .route import RouteResponse
 
 
 class EventCreate(BaseModel):
-    club_id: uuid.UUID
     route_id: Optional[uuid.UUID] = None
     name: str
     description: Optional[str] = None

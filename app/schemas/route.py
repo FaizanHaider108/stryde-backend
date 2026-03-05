@@ -3,19 +3,23 @@ from typing import Optional
 from datetime import datetime
 import uuid
 
+from app.models.route import EnvironmentEnum, TerrainEnum, ElevationProfileEnum
 
 class RouteCreate(BaseModel):
     name: str
     distance_km: float
+    elevation_gain_m: Optional[float] = None
     start_lat: float
     start_lng: float
+    start_address: Optional[str] = None
     end_lat: float
     end_lng: float
-    map_data: Optional[str] = None
+    end_address: Optional[str] = None
+    map_data: str
     avoid_pollution: Optional[bool] = False
-    environment: Optional[str] = None
-    terrain: Optional[str] = None
-    elevation_profile: Optional[str] = None
+    environment: Optional[EnvironmentEnum] = None
+    terrain: Optional[TerrainEnum] = None
+    elevation_profile: Optional[ElevationProfileEnum] = None
 
 
 class RouteResponse(RouteCreate):
