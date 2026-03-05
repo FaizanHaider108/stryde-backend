@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
 import uuid
@@ -26,6 +26,4 @@ class RouteResponse(RouteCreate):
     id: uuid.UUID
     creator_id: uuid.UUID
     created_at: Optional[datetime] = None
-
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)

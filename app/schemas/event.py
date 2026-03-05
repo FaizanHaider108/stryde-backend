@@ -1,9 +1,10 @@
 import uuid
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
 
 from .route import RouteResponse
+from .club import SimpleUser
 
 
 class EventCreate(BaseModel):
@@ -21,5 +22,15 @@ class EventResponse(EventCreate):
     attendee_count: Optional[int] = 0
     is_current_user_attending: Optional[bool] = False
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EventInvitationOut(BaseModel):
+    id: uuid.UUID
+    event_id: uuid.UUID
+    inviter: Optional[SimpleUser]
+    invitee: SimpleUser
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

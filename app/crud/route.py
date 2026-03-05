@@ -29,8 +29,8 @@ def get_visible_route(db: Session, route_id: uuid.UUID, current_user_id: Optiona
     """
     query = db.query(Route).filter(Route.id == route_id)
     
-    # Check if an event exists for this route
-    route_is_in_event = exists().where(Event.route_id == Route.id)
+    # Check if a non-deleted event exists for this route
+    route_is_in_event = exists().where(Event.route_id == Route.id, Event.is_deleted == False)
     
     if current_user_id:
         # Creator OR Attached to Event
@@ -98,7 +98,7 @@ def delete_route(db: Session, requester: User, route: Route) -> None:
     if route.creator_id != requester.uid:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator can delete route")
 
-    event = db.query(Event).filter(Event.route_id == route.id).first()
+    event = db.query(Event).filter(Event.route_id == route.id, Event.is_deleted == False).first()
     if event:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Route is attached to an event")
 
