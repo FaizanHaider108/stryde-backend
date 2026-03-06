@@ -26,7 +26,7 @@ app.add_middleware(
 
 def _create_tables():
 	# Import models so they are registered on Base.metadata
-	from .models import user  # noqa: F401
+	from .models import user, password_reset  # noqa: F401
 
 	Base.metadata.create_all(bind=engine)
 

@@ -18,6 +18,7 @@ import app.models.plan
 import app.models.experience
 import app.models.club
 import app.models.run
+import app.models.password_reset
 
 load_dotenv()
 

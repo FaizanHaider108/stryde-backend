@@ -104,6 +104,12 @@ class User(Base):
     runs = relationship("Run", back_populates="user", cascade="all, delete-orphan")
     saved_routes = relationship("Route", back_populates="creator", cascade="all, delete-orphan")
 
+    password_reset_tokens = relationship(
+        "PasswordResetToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
     posts = relationship("Post", back_populates="user", cascade="all, delete-orphan")
     comments = relationship("Comment", back_populates="user", cascade="all, delete-orphan")
     liked_posts = relationship("Post", secondary="post_likes", back_populates="liked_by")

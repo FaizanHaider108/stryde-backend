@@ -9,3 +9,4 @@ from .event import Event, PaceIntensity, event_attendees
 from .invitation import EventInvitation
 from .plan import Plan, PlanWorkout, UserPlan
 from .experience import RunningExperience
+from .password_reset import PasswordResetToken

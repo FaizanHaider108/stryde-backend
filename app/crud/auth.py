@@ -1,7 +1,16 @@
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..lib.security import get_password_hash, verify_password
+from ..lib.security import (
+    RESET_TOKEN_EXPIRE_MINUTES,
+    generate_password_reset_token,
+    get_password_hash,
+    hash_password_reset_token,
+    verify_password,
+)
+from ..models.password_reset import PasswordResetToken
 from ..models.user import AuthProvider, RunnerType, User
 from ..schemas.auth import UserCreate
 
@@ -35,6 +44,62 @@ def authenticate_user(db: Session, email: str, password: str):
         return None
     if not verify_password(password, user.password_hash):
         return None
+    return user
+
+
+def invalidate_password_reset_tokens(db: Session, user: User, now: datetime | None = None) -> None:
+    timestamp = now or datetime.now(timezone.utc)
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.user_id == user.uid,
+        PasswordResetToken.used_at.is_(None),
+    ).update({PasswordResetToken.used_at: timestamp}, synchronize_session=False)
+
+
+def create_password_reset_token(db: Session, user: User, expires_in_minutes: int | None = None) -> tuple[str, PasswordResetToken]:
+    now = datetime.now(timezone.utc)
+    invalidate_password_reset_tokens(db, user, now=now)
+
+    raw_token = generate_password_reset_token()
+    token_hash = hash_password_reset_token(raw_token)
+    expires_at = now + timedelta(minutes=expires_in_minutes or RESET_TOKEN_EXPIRE_MINUTES)
+
+    reset_token = PasswordResetToken(
+        user_id=user.uid,
+        token_hash=token_hash,
+        expires_at=expires_at,
+    )
+    db.add(reset_token)
+    db.commit()
+    db.refresh(reset_token)
+
+    return raw_token, reset_token
+
+
+def get_valid_password_reset_token(db: Session, token_hash: str) -> PasswordResetToken | None:
+    now = datetime.now(timezone.utc)
+    return db.query(PasswordResetToken).filter(
+        PasswordResetToken.token_hash == token_hash,
+        PasswordResetToken.used_at.is_(None),
+        PasswordResetToken.expires_at > now,
+    ).first()
+
+
+def reset_password_with_token(db: Session, reset_token: PasswordResetToken, new_password: str) -> User:
+    user = reset_token.user
+    if not user:
+        raise ValueError("User not found for reset token")
+
+    user.password_hash = get_password_hash(new_password)
+    now = datetime.now(timezone.utc)
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.user_id == user.uid,
+        PasswordResetToken.used_at.is_(None),
+    ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
     return user
 
 
