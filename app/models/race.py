@@ -1,6 +1,6 @@
 """Race model and association tables for save/register actions."""
 import uuid
-from sqlalchemy import Column, String, Text, DateTime, Float, Integer, ForeignKey, Uuid, Table, func
+from sqlalchemy import Column, String, Text, DateTime, Float, Integer, ForeignKey, Uuid, Table, func, UniqueConstraint
 from sqlalchemy.orm import relationship
 from ..lib.db import Base
 
@@ -49,6 +49,10 @@ class Race(Base):
     organizer_name = Column(String, nullable=True)
     registration_url = Column(String, nullable=True)
 
+    external_id = Column(String, nullable=True, unique=True)  # For deduplication when importing from external sources
+    external_provider = Column(String, nullable=True)  # E.g. "Strava", "
+    last_synceft_at = Column(DateTime(timezone=True), nullable=True)  # When we last updated
+
     # Ratings cache
     average_rating = Column(Float, default=0.0)
     review_count = Column(Integer, default=0)
@@ -62,3 +66,7 @@ class Race(Base):
     registered_participants = relationship("User", secondary=registered_races, back_populates="registered_races")
     runs = relationship("Run", back_populates="race")
     posts = relationship("Post", back_populates="race")
+
+    __table_args__ = (
+        UniqueConstraint("external_id", "external_provider", name="uix_internal_race"),
+    )

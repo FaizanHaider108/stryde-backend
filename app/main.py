@@ -6,6 +6,9 @@ from .api.v1 import profile as profile_router
 from .api.v1 import club as club_router
 from .api.v1 import event as event_router
 from .api.v1 import route as route_router
+from .api.v1 import run as run_router
+from .api.v1 import race as race_router
+from .api.v1 import post as post_router
 from .lib.db import Base, engine
 
 app = FastAPI(title="Stryde Backend")
@@ -39,6 +42,9 @@ def on_startup():
 	app.include_router(club_router.router)
 	app.include_router(event_router.router)
 	app.include_router(route_router.router)
+	app.include_router(run_router.router)
+	app.include_router(race_router.router)
+	app.include_router(post_router.router)
 
 
 @app.get("/")
