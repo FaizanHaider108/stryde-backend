@@ -1,3 +1,5 @@
+from random import random
+
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
@@ -71,28 +73,50 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
     start_pt = f"{payload.start_lat},{payload.start_lng}"
     end_pt = f"{payload.end_lat},{payload.end_lng}"
 
-    if (start_pt == end_pt):
-        # For loop routes, GraphHopper expects the start and end to be the same and uses the "round_trip" parameters to generate a loop
+    # --- 1. PREFERENCE MAPPING (The Friday Shortcut) ---
+    # We safely extract the string values in case Pydantic passes them as raw strings
+    terrain_pref = getattr(payload, 'terrain', None)
+    elevation_pref = getattr(payload, 'elevation_profile', None)
+    
+    # Default to standard pedestrian
+    gh_profile = "foot" 
+
+    # Swap the engine profile based on user preferences
+    if terrain_pref == "unpaved" or terrain_pref == TerrainEnum.unpaved:
+        gh_profile = "hike" 
+    elif elevation_pref == "flat" or elevation_pref == ElevationProfileEnum.flat:
+        # Wheelchair profile is the most aggressive way to force perfectly flat, paved routes
+        gh_profile = "foot" 
+
+    # --- 2. ROUTING LOGIC ---
+    if start_pt == end_pt:
         point = start_pt
         algorithm = "round_trip"
     else:
-        # For point-to-point routes, we provide both start and end points and let GH calculate the best route between them
         point = [start_pt, end_pt]
-        algorithm = "alternative_route"  # This will give us multiple route options if available, we can just take the best one
-    
-    target_distance_meters = int(float(payload.distance_km) * 1000)
+        algorithm = "alternative_route"
+
+    seed = int(random() * 1000000)  # Random seed for variability in round trips
     
     url = "https://graphhopper.com/api/1/route"
     
     params = {
         "point": point,
-        "profile": "foot",             # 'foot' is optimized for pedestrian paths/sidewalks
-        "algorithm": algorithm,     # Triggers the loop generation
-        "round_trip.distance": target_distance_meters,
-        "round_trip.seed": 0,          # Change this to generate alternative loops
-        "points_encoded": "true",      # Requests the encoded polyline string
-        "key": GRAPHHOPPER_API_KEY
+        "profile": gh_profile,      # Dynamically injected profile!
+        "algorithm": algorithm,
+        "points_encoded": "true",
+        "key": GRAPHHOPPER_API_KEY,
+        # Elevation data returns Z-coordinates. Set to true if your frontend needs it.
+        "elevation": "false"        
     }
+
+    # Safely attach algorithm-specific parameters to prevent API crashes
+    if algorithm == "round_trip":
+        target_distance_meters = int(float(payload.distance_km) * 1000)
+        params["round_trip.distance"] = target_distance_meters
+        params["round_trip.seed"] = seed
+    else:
+        params["alternative_route.max_paths"] = 2 
 
     try:
         async with httpx.AsyncClient() as client:
@@ -100,31 +124,30 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
             response.raise_for_status()
             data = response.json()
             
-            # GraphHopper stores the routes in a "paths" array
             if not data.get("paths"):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST, 
-                    detail="Could not generate a loop for this location"
+                    detail=f"Could not generate a route for this location: {str(exc)}"
                 )
             
             best_route = data["paths"][0]
 
-            # 4. Extract and format the specific fields you need
+            # Return exactly what the endpoint needs
             return {
-                "map_data": best_route["points"], # This is your encoded polyline string
-                "distance_km": round(best_route["distance"] / 1000, 2), # Actual generated distance
-                "duration_seconds": int(best_route["time"] / 1000)      # GH returns time in milliseconds
+                "map_data": best_route["points"],
+                "distance_km": round(best_route["distance"] / 1000, 2),
+                "duration_seconds": int(best_route["time"] / 1000)
             }
 
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="Error connecting to GraphHopper"
+            detail=f"Error connecting to GraphHopper API: {str(exc)}"
         ) from exc
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=exc.response.status_code, 
-            detail=f"GraphHopper API error: {exc.response.text}"
+            detail=f"GraphHopper API error: {str(exc)}"
         ) from exc
     
 def save_route(db: Session, creator: User, payload: RouteSave) -> Route:
