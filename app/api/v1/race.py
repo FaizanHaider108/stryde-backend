@@ -9,7 +9,7 @@ from app.crud.race import sync_or_create_external_race, get_race_by_id
 from app.lib.db import get_db
 from app.schemas.race import ExternalRaceSync, SyncResponse, RaceResponse
 
-router = APIRouter(prefix="/races", tags=["Races"])
+router = APIRouter(prefix="/api/v1/races", tags=["Races"])
 
 @router.get("/search/external")
 async def search_external_races(query: str):

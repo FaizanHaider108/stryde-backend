@@ -5,7 +5,8 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from ..models import Comment, Post, PostImage, Race, Run, User
+from ..lib.notifications import notify_user
+from ..models import Comment, Post, PostImage, Race, Run, User, NotificationType
 from ..schemas.comment import CommentCreate, CommentResponse
 from ..schemas.post import PostCreate, PostResponse
 
@@ -201,6 +202,16 @@ def like_post(db: Session, user: User, post: Post) -> None:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not like post") from exc
 
+    if str(post.user_id) != str(user.uid):
+        notify_user(
+            db,
+            user_id=post.user_id,
+            notif_type=NotificationType.post_like,
+            actor_id=user.uid,
+            post_id=post.id,
+            payload={"post_id": str(post.id)},
+        )
+
 
 def list_post_comments(db: Session, post: Post, current_user_id: Optional[uuid.UUID] = None) -> list[CommentResponse]:
     comments = (
@@ -223,6 +234,17 @@ def create_comment(db: Session, user: User, post: Post, payload: CommentCreate) 
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not add comment") from exc
+
+    if str(post.user_id) != str(user.uid):
+        notify_user(
+            db,
+            user_id=post.user_id,
+            notif_type=NotificationType.post_comment,
+            actor_id=user.uid,
+            post_id=post.id,
+            comment_id=comment.id,
+            payload={"post_id": str(post.id), "comment_id": str(comment.id)},
+        )
     return comment
 
 
@@ -242,6 +264,17 @@ def like_comment(db: Session, user: User, comment: Comment) -> None:
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not like comment") from exc
+
+    if str(comment.user_id) != str(user.uid):
+        notify_user(
+            db,
+            user_id=comment.user_id,
+            notif_type=NotificationType.comment_like,
+            actor_id=user.uid,
+            post_id=comment.post_id,
+            comment_id=comment.id,
+            payload={"post_id": str(comment.post_id), "comment_id": str(comment.id)},
+        )
 
 
 def unlike_comment(db: Session, user: User, comment: Comment) -> None:

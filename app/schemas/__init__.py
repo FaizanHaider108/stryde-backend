@@ -13,3 +13,5 @@ from .event import *
 from .plan import *
 from .post import *
 from .comment import *
+from .chat import *
+from .notification import *

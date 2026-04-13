@@ -5,7 +5,8 @@ import uuid
 
 from fastapi import HTTPException, status
 
-from ..models import Event, EventInvitation, Club, ClubMember, ClubRole, User, InvitationStatus, Route
+from ..lib.notifications import notify_user
+from ..models import Event, EventInvitation, Club, ClubMember, ClubRole, User, InvitationStatus, NotificationType, Route
 from ..schemas.event import EventCreate
 
 
@@ -152,6 +153,16 @@ def invite_to_event(db: Session, inviter: User, event: Event, invitee_uid: str) 
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create event invitation")
+
+    notify_user(
+        db,
+        user_id=invitee_uuid,
+        notif_type=NotificationType.event_invitation,
+        actor_id=inviter.uid,
+        club_id=club.id,
+        event_id=event.id,
+        payload={"invitation_id": str(invitation.id)},
+    )
     return invitation
 
 

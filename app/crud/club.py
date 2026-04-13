@@ -5,7 +5,8 @@ import uuid
 
 from fastapi import HTTPException, status
 
-from ..models import Club, ClubMember, ClubRole, ClubInvitation, InvitationStatus, User
+from ..lib.notifications import notify_user
+from ..models import Club, ClubMember, ClubRole, ClubInvitation, InvitationStatus, NotificationType, User
 
 
 def create_club(db: Session, owner: User, name: str, description: Optional[str] = None, image_url: Optional[str] = None) -> Club:
@@ -82,6 +83,15 @@ def invite_member(db: Session, inviter: User, club: Club, invitee_uid: str) -> C
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create invitation") from exc
+
+    notify_user(
+        db,
+        user_id=invitee_uuid,
+        notif_type=NotificationType.club_invitation,
+        actor_id=inviter.uid,
+        club_id=club.id,
+        payload={"invitation_id": str(invitation.id)},
+    )
     return invitation
 
 

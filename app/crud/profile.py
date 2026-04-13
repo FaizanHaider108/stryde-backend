@@ -6,6 +6,8 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
+from ..lib.notifications import notify_user
+from ..models import NotificationType
 from ..models.user import User
 from ..schemas.profile import (
     PersonalInfoOut, 
@@ -129,17 +131,28 @@ def follow_user(db: Session, follower: User, target_uid: str) -> User:
         )
 
     # Check if already following to prevent duplicates
+    created = False
     if target not in follower.following:
         follower.following.append(target)
         try:
             db.commit()
             db.refresh(follower)
+            created = True
         except IntegrityError:
             db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Error establishing follow relationship."
             )
+
+    if created:
+        notify_user(
+            db,
+            user_id=target.uid,
+            notif_type=NotificationType.follow,
+            actor_id=follower.uid,
+            payload={"follower_id": str(follower.uid)},
+        )
 
     return target
 

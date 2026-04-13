@@ -115,6 +115,21 @@ class User(Base):
     liked_posts = relationship("Post", secondary="post_likes", back_populates="liked_by")
     liked_comments = relationship("Comment", secondary="comment_likes", back_populates="liked_by")
 
+    club_messages = relationship("ClubMessage", back_populates="sender", cascade="all, delete-orphan")
+    message_reads = relationship("ClubMessageRead", back_populates="user", cascade="all, delete-orphan")
+
+    notifications = relationship(
+        "Notification",
+        foreign_keys="[Notification.user_id]",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    sent_notifications = relationship(
+        "Notification",
+        foreign_keys="[Notification.actor_id]",
+        back_populates="actor",
+    )
+
     # Event relations
     created_events = relationship("Event", foreign_keys="[Event.creator_id]", back_populates="creator", cascade="all, delete-orphan")
     attended_events = relationship("Event", secondary="event_attendees", back_populates="attendees")

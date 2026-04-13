@@ -78,6 +78,13 @@ class Club(Base):
         passive_deletes=True
     )
 
+    messages = relationship(
+        "ClubMessage",
+        back_populates="club",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     # Adding the invitations relationship explicitly
     invitations = relationship(
         "ClubInvitation",
