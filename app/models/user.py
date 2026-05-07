@@ -6,7 +6,7 @@ profile fields, resume fields, timestamps, then relationships.
 import enum
 import uuid
 
-from sqlalchemy import Table, ForeignKey, Column, Date, DateTime, Enum, Float, String, func, Uuid
+from sqlalchemy import Table, ForeignKey, Column, Date, DateTime, Enum, Float, JSON, String, func, Uuid
 from sqlalchemy.orm import relationship
 from ..lib.db import Base
 
@@ -76,6 +76,10 @@ class User(Base):
     location = Column(String, nullable=True)
     bio_title = Column(String, nullable=True)
     started_running_date = Column(Date, nullable=True)
+
+    # Push notifications
+    expo_push_token = Column(String, nullable=True)
+    notification_prefs = Column(JSON, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())

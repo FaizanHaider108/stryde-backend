@@ -25,6 +25,11 @@ class RaceResponse(BaseModel):
     location_text: str
     distance_km: float
     distance_label: str
+    map_data: Optional[str] = None
+    elevation_gain_m: Optional[float] = None
+    terrain_info: Optional[str] = None
+    organizer_name: Optional[str] = None
+    registration_url: Optional[str] = None
     average_rating: float
     review_count: int
     

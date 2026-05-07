@@ -12,3 +12,4 @@ from .experience import RunningExperience
 from .password_reset import PasswordResetToken
 from .chat import ClubMessage, ClubMessageRead
 from .notification import Notification, NotificationType
+from .subscription import UserSubscription

@@ -48,4 +48,4 @@ class Run(Base):
 
     # Post relationship (a run can be shared as a single Post)
     posts = relationship("Post", back_populates="run")
-    post = relationship("Post", back_populates="run", uselist=False, cascade="all, delete-orphan")
+    post = relationship("Post", back_populates="run", uselist=False, cascade="all, delete-orphan", overlaps="posts")

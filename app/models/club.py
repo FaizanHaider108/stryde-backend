@@ -54,6 +54,7 @@ class Club(Base):
     name = Column(String, nullable=False, index=True)
     description = Column(Text, nullable=True)
     image_url = Column(String, nullable=True)
+    is_community = Column(Boolean, nullable=False, server_default="false", index=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())

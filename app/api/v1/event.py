@@ -4,13 +4,38 @@ import uuid
 
 from ...lib.db import get_db
 from ...lib.security import get_current_user
-from ...models import User
+from ...models import User, ClubMember
 from ...crud import event as event_crud
 from ...crud import club as club_crud
 from ...schemas.event import EventCreate, EventResponse, EventInvitationOut
 from ...schemas.club import InvitePayload
 
 router = APIRouter()
+
+
+@router.get("/api/v1/clubs/{club_id:uuid}/events", response_model=list[EventResponse])
+def list_club_events(club_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    club = club_crud.get_club(db, str(club_id))
+    if not club:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    membership = db.query(ClubMember).filter(
+        ClubMember.club_id == club.id,
+        ClubMember.user_id == current_user.uid,
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="only members can view club events")
+
+    events = event_crud.list_events_for_club(db, club)
+    response_events: list[EventResponse] = []
+    for ev in events:
+        attendee_count = len(ev.attendees) if ev.attendees is not None else 0
+        is_current_user_attending = any(str(a.uid) == str(current_user.uid) for a in (ev.attendees or []))
+        resp = EventResponse.model_validate(ev)
+        resp.attendee_count = attendee_count
+        resp.is_current_user_attending = is_current_user_attending
+        response_events.append(resp)
+    return response_events
 
 
 @router.post("/api/v1/clubs/{club_id:uuid}/events", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
@@ -23,15 +48,16 @@ def create_event(club_id: uuid.UUID, payload: EventCreate, db: Session = Depends
 
 
 @router.get("/api/v1/events/{event_id:uuid}", response_model=EventResponse)
-def get_event(club_id: uuid.UUID, event_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    club = club_crud.get_club(db, str(club_id))
-    if not club:
-        raise HTTPException(status_code=404, detail="club not found")
+def get_event(event_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ev = event_crud.get_event(db, str(event_id))
     if not ev:
         raise HTTPException(status_code=404, detail="event not found")
-    if str(ev.club_id) != str(club.id):
-        raise HTTPException(status_code=404, detail="event not found")
+    membership = db.query(ClubMember).filter(
+        ClubMember.club_id == ev.club_id,
+        ClubMember.user_id == current_user.uid,
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="only members can view event details")
 
     # augment response with attendee metadata
     attendee_count = len(ev.attendees) if ev.attendees is not None else 0
@@ -43,15 +69,16 @@ def get_event(club_id: uuid.UUID, event_id: uuid.UUID, db: Session = Depends(get
 
 
 @router.post("/api/v1/events/{event_id:uuid}/join", response_model=EventResponse)
-def join_event(club_id: uuid.UUID, event_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    club = club_crud.get_club(db, str(club_id))
-    if not club:
-        raise HTTPException(status_code=404, detail="club not found")
+def join_event(event_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ev = event_crud.get_event(db, str(event_id))
     if not ev:
         raise HTTPException(status_code=404, detail="event not found")
-    if str(ev.club_id) != str(club.id):
-        raise HTTPException(status_code=404, detail="event not found")
+    membership = db.query(ClubMember).filter(
+        ClubMember.club_id == ev.club_id,
+        ClubMember.user_id == current_user.uid,
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="only members can join this event")
     event_crud.join_event(db, current_user, ev)
     # return updated event info
     attendee_count = len(ev.attendees) if ev.attendees is not None else 0
@@ -63,15 +90,16 @@ def join_event(club_id: uuid.UUID, event_id: uuid.UUID, db: Session = Depends(ge
 
 
 @router.post("/api/v1/events/{event_id:uuid}/invite")
-def invite_to_event(club_id: uuid.UUID, event_id: uuid.UUID, payload: InvitePayload, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    club = club_crud.get_club(db, str(club_id))
-    if not club:
-        raise HTTPException(status_code=404, detail="club not found")
+def invite_to_event(event_id: uuid.UUID, payload: InvitePayload, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ev = event_crud.get_event(db, str(event_id))
     if not ev:
         raise HTTPException(status_code=404, detail="event not found")
-    if str(ev.club_id) != str(club.id):
-        raise HTTPException(status_code=404, detail="event not found")
+    membership = db.query(ClubMember).filter(
+        ClubMember.club_id == ev.club_id,
+        ClubMember.user_id == current_user.uid,
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="only members can invite others")
     inv = event_crud.invite_to_event(db, current_user, ev, payload.invitee_uid)
     return {"id": str(inv.id), "status": inv.status.value}
 

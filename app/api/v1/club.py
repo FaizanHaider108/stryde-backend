@@ -23,21 +23,29 @@ def create_club(payload: ClubCreate, db: Session = Depends(get_db), current_user
 
 
 @router.get("/", response_model=list[ClubOut])
-def list_clubs(db: Session = Depends(get_db)):
+def list_clubs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return club_crud.list_clubs(db)
 
 
-@router.get("/{club_id:uuid}", response_model=ClubOut)
-def get_club(club_id: uuid.UUID, db: Session = Depends(get_db)):
-    club = club_crud.get_club(db, str(club_id))
-    if not club:
-        raise HTTPException(status_code=404, detail="club not found")
-    return club
+@router.get("/community", response_model=ClubOut)
+def get_community(db: Session = Depends(get_db)):
+    """Get the STRIDE system community."""
+    community = club_crud.get_or_create_community(db)
+    return community
+
 
 @router.get("/invitations", response_model=list[InvitationOut])
 def my_invitations(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """List invitations addressed to the current user."""
     return club_crud.list_user_invitations(db, current_user)
+
+
+@router.get("/{club_id:uuid}", response_model=ClubOut)
+def get_club(club_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    club = club_crud.get_club(db, str(club_id))
+    if not club:
+        raise HTTPException(status_code=404, detail="club not found")
+    return club
 
 @router.post("/{club_id:uuid}/invite", response_model=InvitationOut)
 def invite(club_id: uuid.UUID, payload: InvitePayload, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

@@ -3,8 +3,7 @@
 Group columns (PK, FKs, attributes, timestamps) and relationships for readability.
 """
 import uuid
-from sqlalchemy import Column, String, Text, DateTime, Float, Integer, ForeignKey, Uuid, Boolean, Date, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, String, Text, DateTime, Float, Integer, ForeignKey, Uuid, Boolean, Date, func, JSON
 from sqlalchemy.orm import relationship
 from ..lib.db import Base
 
@@ -27,6 +26,7 @@ class Plan(Base):
     total_runs = Column(Integer, nullable=False)
     duration_weeks = Column(Integer, nullable=False)
     experience_level = Column(String, nullable=True)
+    goal_type = Column(String, nullable=True)  # 'marathon' or 'race'
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -63,7 +63,7 @@ class PlanWorkout(Base):
     target_pace_kmh = Column(Float, nullable=True)
 
     # Variable pace / display data
-    variable_pace_data = Column(JSONB, nullable=True)
+    variable_pace_data = Column(JSON, nullable=True)
 
     # Relationships
     plan = relationship("Plan", back_populates="workouts")

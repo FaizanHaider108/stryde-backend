@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import uuid
-import os
 
 from ...lib.db import get_db
 from ...lib.security import get_current_user
@@ -9,7 +8,7 @@ from ...models import User
 from ...crud import route as route_crud
 from ...schemas.route import RouteCreate, RouteResponse, RouteSave, RouteCreateResponse
 
-MAPBOX_ACCESS_KEY = os.getenv("MAPBOX_ACCESS_KEY")
+
 
 router = APIRouter(prefix="/api/v1/routes", tags=["routes"])
 
@@ -27,7 +26,7 @@ def get_single_route(route_id: uuid.UUID, db: Session = Depends(get_db), current
         raise HTTPException(status_code=404, detail="Route not found or access denied")
     return route
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=RouteCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_route(payload: RouteCreate, current_user: User = Depends(get_current_user)):
     route = await route_crud.create_route(payload, current_user)
     return route

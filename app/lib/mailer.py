@@ -25,7 +25,7 @@ def _get_smtp_config() -> tuple[str, int, str | None, str | None, str, bool, boo
     return host, port, username, password, from_addr, use_tls, use_ssl
 
 
-def send_email(to_email: str, subject: str, body: str) -> None:
+def send_email(to_email: str, subject: str, body: str, html_body: str | None = None) -> None:
     host, port, username, password, from_addr, use_tls, use_ssl = _get_smtp_config()
 
     message = EmailMessage()
@@ -33,6 +33,8 @@ def send_email(to_email: str, subject: str, body: str) -> None:
     message["To"] = to_email
     message["Subject"] = subject
     message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
 
     if use_ssl:
         context = ssl.create_default_context()

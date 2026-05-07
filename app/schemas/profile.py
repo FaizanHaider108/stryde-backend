@@ -1,8 +1,10 @@
 from enum import Enum
 from typing import Optional
 from datetime import date
+import uuid
 
 from pydantic import BaseModel, EmailStr, validator
+from ..models.user import AuthProvider, RunnerType
 
 
 class Gender(str, Enum):
@@ -111,6 +113,8 @@ class PersonalInfoOut(BaseModel):
     uid: str
     email: EmailStr
     full_name: str
+    runner_type: RunnerType
+    auth_provider: AuthProvider
     profile_image_s3_key: Optional[str]
     date_of_birth: Optional[date]
     gender: Optional[Gender]
@@ -122,7 +126,7 @@ class PersonalInfoOut(BaseModel):
     weight_lb: Optional[float]
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class SimpleUser(BaseModel):
@@ -131,7 +135,7 @@ class SimpleUser(BaseModel):
     profile_image_s3_key: Optional[str]
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ProfileWithSocialOut(PersonalInfoOut):
@@ -141,4 +145,14 @@ class ProfileWithSocialOut(PersonalInfoOut):
     following: list[SimpleUser] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+
+
+class InviteUserOut(BaseModel):
+    uid: uuid.UUID
+    full_name: str
+    runner_type: RunnerType
+    profile_image_s3_key: Optional[str]
+
+    class Config:
+        from_attributes = True

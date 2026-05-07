@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from ..lib.notifications import notify_user
-from ..models import Comment, Post, PostImage, Race, Run, User, NotificationType
+from ..models import Comment, Post, PostImage, Race, Route, Run, User, NotificationType
 from ..schemas.comment import CommentCreate, CommentResponse
 from ..schemas.post import PostCreate, PostResponse
 
@@ -69,6 +69,37 @@ def _build_race_summary(race: Optional[Race]) -> Optional[dict]:
     }
 
 
+def _build_route_summary(post: Post) -> Optional[dict]:
+    if post.route:
+        route = post.route
+        return {
+            "id": route.id,
+            "name": route.name,
+            "distance_km": route.distance_km,
+            "elevation_gain_m": route.elevation_gain_m,
+            "start_lat": route.start_lat,
+            "start_lng": route.start_lng,
+            "end_lat": route.end_lat,
+            "end_lng": route.end_lng,
+            "map_data": route.map_data,
+        }
+
+    if post.route_snapshot_id and post.route_snapshot_map_data:
+        return {
+            "id": post.route_snapshot_id,
+            "name": post.route_snapshot_name or "Shared route",
+            "distance_km": post.route_snapshot_distance_km or 0,
+            "elevation_gain_m": post.route_snapshot_elevation_gain_m,
+            "start_lat": post.route_snapshot_start_lat or 0,
+            "start_lng": post.route_snapshot_start_lng or 0,
+            "end_lat": post.route_snapshot_end_lat or 0,
+            "end_lng": post.route_snapshot_end_lng or 0,
+            "map_data": post.route_snapshot_map_data,
+        }
+
+    return None
+
+
 def build_post_response(post: Post, current_user_id: Optional[uuid.UUID] = None) -> PostResponse:
     images = sorted(post.images or [], key=lambda image: image.display_order)
     likes = post.liked_by or []
@@ -86,6 +117,7 @@ def build_post_response(post: Post, current_user_id: Optional[uuid.UUID] = None)
         images=[image.image_url for image in images],
         run=_build_run_summary(post.run),
         race=_build_race_summary(post.race),
+        route=_build_route_summary(post),
         likes_count=len(likes),
         comments_count=len(comments),
         is_liked_by_current_user=is_liked,
@@ -128,8 +160,28 @@ def list_user_posts(db: Session, user_id: uuid.UUID, current_user_id: Optional[u
             selectinload(Post.liked_by),
             selectinload(Post.run),
             selectinload(Post.race),
+            selectinload(Post.route),
         )
         .filter(Post.user_id == user_id)
+        .order_by(Post.created_at.desc())
+        .all()
+    )
+
+    return [build_post_response(post, current_user_id) for post in posts]
+
+
+def list_all_posts(db: Session, current_user_id: Optional[uuid.UUID] = None) -> list[PostResponse]:
+    posts = (
+        db.query(Post)
+        .options(
+            selectinload(Post.user),
+            selectinload(Post.images),
+            selectinload(Post.comments),
+            selectinload(Post.liked_by),
+            selectinload(Post.run),
+            selectinload(Post.race),
+            selectinload(Post.route),
+        )
         .order_by(Post.created_at.desc())
         .all()
     )
@@ -155,22 +207,49 @@ def _ensure_race_shareable(db: Session, race_id: uuid.UUID) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="race not found")
 
 
+def _ensure_route_shareable(db: Session, user: User, route_id: uuid.UUID) -> Route:
+    route = db.query(Route).filter(Route.id == route_id).first()
+    if not route:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="route not found")
+    if route.creator_id != user.uid:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Route does not belong to user")
+    return route
+
+
 def create_post(db: Session, user: User, payload: PostCreate) -> Post:
-    if bool(payload.run_id) == bool(payload.race_id):
+    provided = sum([
+        bool(payload.run_id),
+        bool(payload.race_id),
+        bool(payload.route_id),
+    ])
+    if provided != 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Exactly one of run_id or race_id must be provided",
+            detail="Exactly one of run_id, race_id, or route_id must be provided",
         )
 
     if payload.run_id:
         _ensure_run_shareable(db, user, payload.run_id)
     if payload.race_id:
         _ensure_race_shareable(db, payload.race_id)
+    shared_route: Optional[Route] = None
+    if payload.route_id:
+        shared_route = _ensure_route_shareable(db, user, payload.route_id)
 
     post = Post(
         user_id=user.uid,
         run_id=payload.run_id,
         race_id=payload.race_id,
+        route_id=payload.route_id,
+        route_snapshot_id=shared_route.id if shared_route else None,
+        route_snapshot_name=shared_route.name if shared_route else None,
+        route_snapshot_distance_km=shared_route.distance_km if shared_route else None,
+        route_snapshot_elevation_gain_m=shared_route.elevation_gain_m if shared_route else None,
+        route_snapshot_start_lat=shared_route.start_lat if shared_route else None,
+        route_snapshot_start_lng=shared_route.start_lng if shared_route else None,
+        route_snapshot_end_lat=shared_route.end_lat if shared_route else None,
+        route_snapshot_end_lng=shared_route.end_lng if shared_route else None,
+        route_snapshot_map_data=shared_route.map_data if shared_route else None,
         caption=payload.caption,
     )
 

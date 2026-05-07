@@ -1,7 +1,14 @@
+import logging
+import os
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+from sqlalchemy.exc import SQLAlchemyError
+from fastapi.encoders import jsonable_encoder
 
 from .api.v1 import auth as auth_router
 from .api.v1 import profile as profile_router
@@ -13,14 +20,28 @@ from .api.v1 import race as race_router
 from .api.v1 import post as post_router
 from .api.v1 import chat as chat_router
 from .api.v1 import notifications as notifications_router
+from .api.v1 import upload as upload_router
+from .api.v1 import plan as plan_router
+from .api.v1.subscription import router as subscription_router
 from .lib.db import Base, engine
 
-app = FastAPI(title="Stryde Backend")
+logger = logging.getLogger(__name__)
 
-# CORS: allow local frontend during development
-origins = [
-	"*",
-]
+app = FastAPI(title="Stryde Backend", redirect_slashes=False)
+
+def _load_cors_origins() -> list[str]:
+	raw = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+	if raw:
+		return [origin.strip() for origin in raw.split(",") if origin.strip()]
+	return [
+		"http://localhost:3000",
+		"http://127.0.0.1:3000",
+		"http://localhost:8081",
+		"http://127.0.0.1:8081",
+	]
+
+
+origins = _load_cors_origins()
 
 app.add_middleware(
 	CORSMiddleware,
@@ -93,24 +114,44 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
 	if error_messages:
 		detail = f"Invalid request data. {'; '.join(error_messages[:3])}."
 
+	# Ensure nested ctx values (e.g. ValueError objects) are JSON-safe.
+	safe_errors = jsonable_encoder(exc.errors(), custom_encoder={ValueError: lambda v: str(v)})
+
 	return JSONResponse(
 		status_code=422,
 		content={
 			"detail": detail,
-			"errors": exc.errors(),
+			"errors": safe_errors,
 		},
 	)
 
-def _create_tables():
+def _create_tables() -> None:
 	# Import models so they are registered on Base.metadata
-	from .models import user, password_reset, chat, notification  # noqa: F401
-
+	from .models import user, password_reset, chat, notification, plan, subscription  # noqa: F401
 	Base.metadata.create_all(bind=engine)
 
 
 @app.on_event("startup")
 def on_startup():
-	_create_tables()
+	strict_startup = os.getenv("DB_STARTUP_STRICT", "false").lower() in {"1", "true", "yes", "on"}
+	verbose_startup_errors = os.getenv("DB_STARTUP_VERBOSE_ERRORS", "false").lower() in {"1", "true", "yes", "on"}
+	try:
+		_create_tables()
+	except SQLAlchemyError:
+		if strict_startup:
+			raise
+		if verbose_startup_errors:
+			logger.exception("Database initialization failed during startup.")
+		else:
+			logger.warning("Database initialization skipped: database is currently unreachable.")
+		logger.warning(
+			"API started without DB initialization (DB_STARTUP_STRICT is disabled)."
+		)
+		logger.info(
+			"Tip: set DB_STARTUP_VERBOSE_ERRORS=true for full traceback, "
+			"or DB_STARTUP_STRICT=true to fail startup."
+		)
+
 	app.include_router(auth_router.router)
 	app.include_router(profile_router.router)
 	app.include_router(club_router.router)
@@ -121,8 +162,17 @@ def on_startup():
 	app.include_router(post_router.router)
 	app.include_router(chat_router.router)
 	app.include_router(notifications_router.router)
+	app.include_router(upload_router.router)
+	app.include_router(plan_router.router)
+	app.include_router(subscription_router)
 
 
 @app.get("/api/v1/health")
 def read_root():
 	return {"status": "ok"}
+
+
+# Setup static file serving for uploads
+upload_dir = Path("uploads")
+upload_dir.mkdir(exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(upload_dir)), name="uploads")

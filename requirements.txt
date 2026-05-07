@@ -7,4 +7,7 @@ python-dotenv
 bcrypt==4.3.0
 alembic
 PyJWT
-xmltodicts
+xmltodict
+boto3
+stripe
+firebase-admin

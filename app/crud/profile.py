@@ -84,6 +84,8 @@ def build_profile_response(user: User) -> PersonalInfoOut:
         uid=str(user.uid),
         email=user.email,
         full_name=user.full_name,
+        runner_type=user.runner_type,
+        auth_provider=user.auth_provider,
         profile_image_s3_key=user.profile_image_s3_key,
         date_of_birth=user.date_of_birth,
         gender=user.gender,

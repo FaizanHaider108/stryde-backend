@@ -19,7 +19,7 @@ class SimpleUser(BaseModel):
     profile_image_s3_key: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ClubMemberOut(BaseModel):
@@ -28,7 +28,7 @@ class ClubMemberOut(BaseModel):
     joined_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ClubOut(BaseModel):
@@ -36,11 +36,12 @@ class ClubOut(BaseModel):
     name: str
     description: Optional[str] = None
     image_url: Optional[str] = None
+    is_community: bool = False
     created_at: datetime
     members: list[ClubMemberOut] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class InvitePayload(BaseModel):
@@ -56,7 +57,7 @@ class InvitationOut(BaseModel):
     created_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ClubCreate(BaseModel):
@@ -74,4 +75,4 @@ class ClubResponse(BaseModel):
     current_user_role: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True

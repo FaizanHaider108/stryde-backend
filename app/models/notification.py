@@ -2,8 +2,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Uuid, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, JSON, Uuid, func
 from sqlalchemy.orm import relationship
 
 from ..lib.db import Base
@@ -31,7 +30,7 @@ class Notification(Base):
     post_id = Column(Uuid, ForeignKey("posts.id", ondelete="CASCADE"), nullable=True, index=True)
     comment_id = Column(Uuid, ForeignKey("comments.id", ondelete="CASCADE"), nullable=True, index=True)
 
-    payload = Column(JSONB, nullable=True)
+    payload = Column(JSON, nullable=True)
 
     is_read = Column(Boolean, nullable=False, server_default="false")
     read_at = Column(DateTime(timezone=True), nullable=True)

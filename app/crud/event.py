@@ -1,5 +1,6 @@
+import logging
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from typing import Optional
 import uuid
 
@@ -7,7 +8,10 @@ from fastapi import HTTPException, status
 
 from ..lib.notifications import notify_user
 from ..models import Event, EventInvitation, Club, ClubMember, ClubRole, User, InvitationStatus, NotificationType, Route
+from ..models.event import PaceIntensity
 from ..schemas.event import EventCreate
+
+logger = logging.getLogger(__name__)
 
 
 def create_event(db: Session, creator: User, club: Club, payload: EventCreate) -> Event:
@@ -29,6 +33,13 @@ def create_event(db: Session, creator: User, club: Club, payload: EventCreate) -
     if route.creator_id != creator.uid:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Route does not belong to user")
     
+    if not payload.start_time:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="start_time is required")
+
+    normalized_pace = _normalize_pace_intensity(payload.pace_intensity)
+    if normalized_pace is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid pace intensity")
+
     event = Event(
         club_id=club.id,
         creator_id=creator.uid,
@@ -36,7 +47,7 @@ def create_event(db: Session, creator: User, club: Club, payload: EventCreate) -
         name=payload.name,
         description=payload.description,
         start_time=payload.start_time,
-        pace_intensity=payload.pace_intensity,
+        pace_intensity=normalized_pace,
     )
     try:
         db.add(event)
@@ -44,8 +55,26 @@ def create_event(db: Session, creator: User, club: Club, payload: EventCreate) -
         db.refresh(event)
     except IntegrityError as exc:
         db.rollback()
+        logger.exception("Failed to create event due to integrity error")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create event") from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Failed to create event due to invalid SQLAlchemy payload")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid event data") from exc
     return event
+
+
+def _normalize_pace_intensity(value: Optional[str]) -> Optional[PaceIntensity]:
+    if not value:
+        return None
+
+    normalized = value.strip().lower()
+    mapping = {
+        "easy": PaceIntensity.easy,
+        "tempo": PaceIntensity.tempo,
+        "intervals": PaceIntensity.intervals,
+    }
+    return mapping.get(normalized)
 
 
 def get_event(db: Session, event_id: str) -> Optional[Event]:

@@ -17,9 +17,6 @@ router = APIRouter(tags=["notifications"])
 
 
 def _extract_ws_token(websocket: WebSocket) -> Optional[str]:
-    token = websocket.query_params.get("token")
-    if token:
-        return token
     auth_header = websocket.headers.get("Authorization")
     if not auth_header:
         return None

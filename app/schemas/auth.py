@@ -2,7 +2,7 @@ from enum import Enum
 import uuid
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from .profile import PersonalInfoOut
+from .profile import PersonalInfoCreate
 
 class RunnerType(str, Enum):
     grinder = "grinder"
@@ -11,13 +11,17 @@ class RunnerType(str, Enum):
     flow_chaser = "flow chaser"
 
 
+class SocialProvider(str, Enum):
+    google = "google"
+    apple = "apple"
+
+
 class UserCreate(BaseModel):
     full_name: str
     email: EmailStr
     password: str
     runner_type: RunnerType
-    personal_info: Optional[PersonalInfoOut] = None
-    
+    personal_info: Optional[PersonalInfoCreate] = None
 
 class UserSignIn(BaseModel):
     email: EmailStr
@@ -31,12 +35,24 @@ class UserOut(BaseModel):
     runner_type: RunnerType
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class Token(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
+
+
+class SocialLoginRequest(BaseModel):
+    provider: SocialProvider
+    token: str
+    runner_type: Optional[RunnerType] = None
+    name_from_frontend: Optional[str] = None
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 
 class PasswordResetRequest(BaseModel):

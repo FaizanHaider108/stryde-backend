@@ -27,7 +27,7 @@ class UserResponse(BaseModel):
     bio_title: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class UserStatsResponse(BaseModel):
@@ -44,7 +44,7 @@ class UserStatsResponse(BaseModel):
     average_pace: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class RunningExperience(BaseModel):
@@ -67,4 +67,4 @@ class UserResumeResponse(BaseModel):
     experiences: Optional[List[RunningExperience]] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True

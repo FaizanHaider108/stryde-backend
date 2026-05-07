@@ -9,6 +9,7 @@ class PostCreate(BaseModel):
     caption: Optional[str] = None
     run_id: Optional[uuid.UUID] = None
     race_id: Optional[uuid.UUID] = None
+    route_id: Optional[uuid.UUID] = None
     images: list[str] = Field(default_factory=list)
 
 
@@ -52,6 +53,20 @@ class RaceSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RouteSummary(BaseModel):
+    id: uuid.UUID
+    name: str
+    distance_km: float
+    elevation_gain_m: Optional[float] = None
+    start_lat: float
+    start_lng: float
+    end_lat: float
+    end_lng: float
+    map_data: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class PostResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
@@ -61,6 +76,7 @@ class PostResponse(BaseModel):
     images: list[str] = Field(default_factory=list)
     run: Optional[RunSummary] = None
     race: Optional[RaceSummary] = None
+    route: Optional[RouteSummary] = None
     likes_count: int = 0
     comments_count: int = 0
     is_liked_by_current_user: bool = False

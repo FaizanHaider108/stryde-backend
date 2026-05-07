@@ -2,6 +2,7 @@ import os
 import hashlib
 import hmac
 import secrets
+import logging
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -16,11 +17,13 @@ from ..models.user import User
 
 SECRET_KEY = os.getenv("JWT_SECRET")
 ALGORITHM = os.getenv("ALGORITHM")
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30 
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "45"))
 RESET_TOKEN_SECRET = os.getenv("RESET_TOKEN_SECRET")
 RESET_TOKEN_EXPIRE_MINUTES = int(os.getenv("RESET_TOKEN_EXPIRE_MINUTES", "60"))
 
 bearer_scheme = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
 
 def _ensure_jwt_config():
@@ -64,6 +67,17 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     return encoded_jwt
 
 
+def create_refresh_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    _ensure_jwt_config()
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "token_type": "refresh"})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
 def decode_access_token(token: str) -> dict:
     _ensure_jwt_config()
     try:
@@ -71,8 +85,15 @@ def decode_access_token(token: str) -> dict:
     except jwt.ExpiredSignatureError as exc:  # pragma: no cover - delegated handling
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired") from exc
     except jwt.InvalidTokenError as exc:  # pragma: no cover - delegated handling
-        print(f"Token decode error: {exc}")  # Log the error for debugging
+        logger.warning("Token decode error: %s", exc)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
+
+
+def decode_refresh_token(token: str) -> dict:
+    payload = decode_access_token(token)
+    if payload.get("token_type") != "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+    return payload
 
 
 def get_current_user(

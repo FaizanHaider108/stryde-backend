@@ -59,3 +59,4 @@ class Route(Base):
     creator = relationship("User", back_populates="saved_routes")
     events = relationship("Event", back_populates="route")
     completed_runs = relationship("Run", back_populates="route")
+    posts = relationship("Post", back_populates="route")

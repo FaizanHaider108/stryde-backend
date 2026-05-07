@@ -33,11 +33,11 @@ def get_club(db: Session, club_id: str) -> Optional[Club]:
         club_uuid = uuid.UUID(club_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid club id")
-    return db.query(Club).filter(Club.id == club_uuid, Club.is_deleted == False).first()
+    return db.query(Club).filter(Club.id == club_uuid, ~Club.is_deleted).first()
 
 
 def list_clubs(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(Club).filter(Club.is_deleted == False).offset(skip).limit(limit).all()
+    return db.query(Club).filter(~Club.is_deleted).offset(skip).limit(limit).all()
 
 
 def invite_member(db: Session, inviter: User, club: Club, invitee_uid: str) -> ClubInvitation:
@@ -108,7 +108,7 @@ def list_user_invitations(db: Session, user: User):
     return (
         db.query(ClubInvitation)
         .join(Club, Club.id == ClubInvitation.club_id)
-        .filter(ClubInvitation.invitee_id == user.uid, ClubInvitation.status == InvitationStatus.pending, Club.is_deleted == False)
+        .filter(ClubInvitation.invitee_id == user.uid, ClubInvitation.status == InvitationStatus.pending, ~Club.is_deleted)
         .order_by(ClubInvitation.created_at.desc())
         .all()
     )
@@ -125,7 +125,7 @@ def accept_invitation(db: Session, invitation: ClubInvitation, user: User) -> Cl
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation is not pending")
 
     # ensure club still active
-    club = db.query(Club).filter(Club.id == invitation.club_id, Club.is_deleted == False).first()
+    club = db.query(Club).filter(Club.id == invitation.club_id, ~Club.is_deleted).first()
     if not club:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="club not found")
 
@@ -153,7 +153,7 @@ def decline_invitation(db: Session, invitation: ClubInvitation, user: User) -> N
     if invitation.status != InvitationStatus.pending:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation is not pending")
     # ensure club still active
-    club = db.query(Club).filter(Club.id == invitation.club_id, Club.is_deleted == False).first()
+    club = db.query(Club).filter(Club.id == invitation.club_id, ~Club.is_deleted).first()
     if not club:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="club not found")
 
@@ -241,3 +241,52 @@ def delete_club(db: Session, owner: User, club: Club) -> None:
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not delete club")
+
+
+def get_or_create_community(db: Session) -> Club:
+    """Get or create the STRIDE community club.
+    
+    The community is a special club owned by the system and visible to all users.
+    """
+    # Look for existing community
+    community = db.query(Club).filter(Club.is_community, ~Club.is_deleted).first()
+    if community:
+        return community
+    
+    # Create new community
+    community = Club(
+        name="Our community",
+        description="The STRIDE community for all runners",
+        image_url=None,
+        is_community=True
+    )
+    try:
+        db.add(community)
+        db.commit()
+        db.refresh(community)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create community") from exc
+    
+    return community
+
+
+def auto_join_community(db: Session, user: User) -> None:
+    """Auto-add a user to the community when they sign up."""
+    try:
+        community = get_or_create_community(db)
+        
+        # Check if user is already a member
+        existing = db.query(ClubMember).filter(
+            ClubMember.club_id == community.id,
+            ClubMember.user_id == user.uid
+        ).first()
+        
+        if not existing:
+            member = ClubMember(club_id=community.id, user_id=user.uid, role=ClubRole.member)
+            db.add(member)
+            db.commit()
+    except Exception:
+        # Silent fail - don't block user creation if community join fails
+        db.rollback()
+        pass

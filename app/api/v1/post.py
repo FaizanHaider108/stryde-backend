@@ -12,6 +12,11 @@ from ...schemas.post import PostCreate, PostResponse
 router = APIRouter(prefix="/api/v1/posts", tags=["posts"])
 
 
+@router.get("/", response_model=list[PostResponse])
+def list_feed_posts(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return post_crud.list_all_posts(db, current_user.uid)
+
+
 @router.get("/me", response_model=list[PostResponse])
 def list_my_posts(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return post_crud.list_user_posts(db, current_user.uid, current_user.uid)

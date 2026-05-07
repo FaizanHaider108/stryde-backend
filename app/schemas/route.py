@@ -1,19 +1,23 @@
-from pydantic import BaseModel, ConfigDict
-from typing import Optional
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Optional, List
 from datetime import datetime
 import uuid
 
 from app.models.route import EnvironmentEnum, TerrainEnum, ElevationProfileEnum
 
+class RouteCoordinate(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
 class RouteBase(BaseModel):
     name: Optional[str] = None
-    distance_km: float
+    distance_km: float = Field(gt=0.1, le=120)
     elevation_gain_m: Optional[float] = None
-    start_lat: float
-    start_lng: float
+    start_lat: float = Field(ge=-90, le=90)
+    start_lng: float = Field(ge=-180, le=180)
     start_address: Optional[str] = None
-    end_lat: float
-    end_lng: float
+    end_lat: float = Field(ge=-90, le=90)
+    end_lng: float = Field(ge=-180, le=180)
     end_address: Optional[str] = None
     map_data: Optional[str] = None
     avoid_pollution: Optional[bool] = False
@@ -34,11 +38,7 @@ class RouteResponse(RouteBase):
     model_config = ConfigDict(from_attributes=True)
 
 class RouteCreateResponse(BaseModel):
-    map_data: str  # The encoded polyline string or GeoJSON
-    distance_meters: float
+    map_data: List[RouteCoordinate]
+    distance_km: float
     duration_seconds: float
-    # Optional: You can echo back the start/end coordinates if the frontend needs them
-    start_lat: float
-    start_lng: float
-    end_lat: float
-    end_lng: float
+    elevation_gain_m: Optional[float] = None

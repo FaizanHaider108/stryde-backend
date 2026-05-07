@@ -8,11 +8,11 @@ from .club import SimpleUser
 
 
 class EventCreate(BaseModel):
-    route_id: Optional[uuid.UUID] = None
+    route_id: uuid.UUID
     name: str
     description: Optional[str] = None
-    start_time: Optional[datetime] = None
-    pace_intensity: Optional[str] = None
+    start_time: datetime
+    pace_intensity: str
 
 
 class EventResponse(EventCreate):

@@ -13,6 +13,7 @@ from ..lib.security import (
 from ..models.password_reset import PasswordResetToken
 from ..models.user import AuthProvider, RunnerType, User
 from ..schemas.auth import UserCreate
+from . import club as club_crud
 
 
 def get_user_by_email(db: Session, email: str):
@@ -32,6 +33,8 @@ def create_user(db: Session, user_in: UserCreate):
     try:
         db.commit()
         db.refresh(user)
+        # Auto-join the user to the community
+        club_crud.auto_join_community(db, user)
     except IntegrityError:
         db.rollback()
         return None
@@ -42,9 +45,56 @@ def authenticate_user(db: Session, email: str, password: str):
     user = get_user_by_email(db, email)
     if not user:
         return None
-    if not verify_password(password, user.password_hash):
+    if not user.password_hash or not verify_password(password, user.password_hash):
         return None
+    # Keep auth method in sync with the latest successful login path.
+    if user.auth_provider != AuthProvider.credentials:
+        user.auth_provider = AuthProvider.credentials
+        db.add(user)
+        db.commit()
+        db.refresh(user)
     return user
+
+
+def login_social_user(
+    db: Session,
+    email: str,
+    full_name: str,
+    runner_type,
+    provider: str,
+):
+    user = get_user_by_email(db, email)
+
+    if user:
+        if full_name and user.full_name != full_name:
+            user.full_name = full_name
+
+        user.auth_provider = AuthProvider(provider)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    resolved_runner_type = runner_type or RunnerType.social_stryder
+    runner_value = resolved_runner_type.value if hasattr(resolved_runner_type, 'value') else resolved_runner_type
+
+    user = User(
+        full_name=full_name,
+        email=email,
+        password_hash=None,
+        runner_type=RunnerType(runner_value),
+        auth_provider=AuthProvider(provider),
+    )
+    db.add(user)
+
+    try:
+        db.commit()
+        db.refresh(user)
+        club_crud.auto_join_community(db, user)
+        return user
+    except IntegrityError:
+        db.rollback()
+        return None
 
 
 def invalidate_password_reset_tokens(db: Session, user: User, now: datetime | None = None) -> None:
@@ -103,23 +153,3 @@ def reset_password_with_token(db: Session, reset_token: PasswordResetToken, new_
     return user
 
 
-# def login_social_user(db: Session, email: str, full_name: str, runner_type: RunnerType, provider: str):
-#     user = get_user_by_email(db, email)
-#     if user:
-#         return user
-#     # Create new user with no password for social login
-#     user = User(
-#         email=email,
-#         full_name=full_name,
-#         password_hash=None,
-#         auth_provider=AuthProvider(provider),
-#         runner_type=runner_type,
-#     )
-#     db.add(user)
-#     try:
-#         db.commit()
-#         db.refresh(user)
-#     except IntegrityError:
-#         db.rollback()
-#         return None
-#     return user

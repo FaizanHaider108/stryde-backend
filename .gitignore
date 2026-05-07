@@ -1,5 +1,55 @@
+# Environment and secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*service-account*.json
+*firebase*.json
+
+# Python virtual environments
 .venv/
+venv/
+env/
+
+# Python cache/build artifacts
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.sqlite3
+
+# Node artifacts (if any tooling is used in backend)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Project-specific local folders
 docs/
+stride-b2956-315203c30932.json
+.gitignore
+.env.example
