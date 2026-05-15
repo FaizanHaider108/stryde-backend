@@ -1,4 +1,4 @@
-# Optional: deploy on Render (https://render.com) — connect repo, set env vars in dashboard.
+# Render Blueprint — set secret values in the dashboard (do not commit real secrets).
 services:
   - type: web
     name: stryde-api
@@ -8,17 +8,61 @@ services:
     plan: free
     healthCheckPath: /api/v1/health
     envVars:
+      - key: PORT
+        value: "8000"
       - key: DATABASE_URL
         sync: false
       - key: JWT_SECRET
-        generateValue: true
+        sync: false
+      - key: ALGORITHM
+        value: HS256
+      - key: REFRESH_TOKEN_EXPIRE_DAYS
+        value: "45"
       - key: RESET_TOKEN_SECRET
-        generateValue: true
+        sync: false
+      - key: RESET_TOKEN_EXPIRE_MINUTES
+        value: "60"
       - key: BACKEND_PUBLIC_URL
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         value: "*"
+      - key: RESET_PASSWORD_URL
+        value: stride://screens/setPassword
+      - key: PASSWORD_RESET_SUBJECT
+        value: Reset your Stryde password
       - key: APPLE_CLIENT_ID
         value: com.strydelabs.app
-      - key: PORT
-        value: "8000"
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_USE_TLS
+        value: "true"
+      - key: SMTP_USE_SSL
+        value: "false"
+      - key: AWS_ACCESS_KEY
+        sync: false
+      - key: AWS_SECRET_KEY
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_S3_BUCKET
+        sync: false
+      - key: GRAPHHOPPER_API_KEY
+        sync: false
+      - key: GLM_API_KEY
+        sync: false
+      - key: GLM_REQUEST_TIMEOUT
+        value: "120"
+      - key: FIREBASE_SERVICE_ACCOUNT_PATH
+        value: ./stride-b2956-315203c30932.json
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      - key: APP_SCHEME
+        value: stride

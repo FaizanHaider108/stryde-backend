@@ -12,12 +12,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini .
 COPY migrations ./migrations
 COPY app ./app
+COPY scripts ./scripts
 
-RUN mkdir -p uploads
+RUN mkdir -p uploads && chmod +x scripts/docker_entrypoint.sh
 
 ENV UVICORN_HOST=0.0.0.0
 ENV UVICORN_PORT=8000
+ENV APP_ROOT=/app
 
 EXPOSE 8000
 
-CMD alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Use shell form so PORT from Render is honored; prepare_db.py fixes DuplicateTable deploys.
+CMD sh scripts/docker_entrypoint.sh
