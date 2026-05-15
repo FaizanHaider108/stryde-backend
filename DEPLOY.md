@@ -82,20 +82,18 @@ On Render: upload JSON as a **secret file** or paste into env and adjust code �
 | `PORT` | Set by Render/Railway in production |
 | `CORS_ALLOWED_ORIGINS` | Optional; `*` for mobile |
 
-## Deploy error: `DuplicateTable: relation "clubs" already exists`
+## Deploy errors (auto-fixed on startup)
 
-This means Postgres **already has tables**, but Alembic thinks no migration ran (empty `alembic_version`).
+`scripts/prepare_db.py` runs before the API on each deploy:
 
-**Fix (one time)** — in Render **Shell** for the service, from `/app`:
+| Error | Fix applied automatically |
+|-------|---------------------------|
+| `DuplicateTable: clubs already exists` | Stamp base revision `82709d7f2519`, then `upgrade head` |
+| `column users.apple_sub does not exist` | DB was wrongly stamped at head; rewind Alembic and run missing migrations |
 
-```bash
-alembic stamp head
-alembic upgrade head
-```
+Do **not** run `alembic stamp head` on a database that already has tables — that skips migrations.
 
-Or redeploy after pulling the latest `Dockerfile` (startup script stamps head automatically when it detects existing tables).
-
-**Fresh database:** create a new empty Postgres on Render and point `DATABASE_URL` to it, then deploy.
+Redeploy after pulling the latest `prepare_db.py`.
 
 ---
 
