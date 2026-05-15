@@ -62,6 +62,8 @@ class User(Base):
     full_name = Column(String, nullable=False)
     password_hash = Column(String, nullable=True)
     auth_provider = Column(Enum(AuthProvider), default=AuthProvider.credentials, nullable=False)
+    # Stable Apple account identifier from identity token `sub` (Sign in with Apple).
+    apple_sub = Column(String(255), unique=True, index=True, nullable=True)
 
     # Profile fields
     # Image: store storage key only (URL derived externally)

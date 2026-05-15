@@ -25,6 +25,13 @@ class EventResponse(EventCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+class EventWithClubResponse(EventResponse):
+    club_id: Optional[uuid.UUID] = None
+    club_name: Optional[str] = None
+    club_image_url: Optional[str] = None
+    club_member_count: Optional[int] = None
+
+
 class EventInvitationOut(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID

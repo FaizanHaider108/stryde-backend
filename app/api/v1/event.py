@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import uuid
@@ -7,10 +8,44 @@ from ...lib.security import get_current_user
 from ...models import User, ClubMember
 from ...crud import event as event_crud
 from ...crud import club as club_crud
-from ...schemas.event import EventCreate, EventResponse, EventInvitationOut
+from ...schemas.event import EventCreate, EventResponse, EventInvitationOut, EventWithClubResponse
 from ...schemas.club import InvitePayload
 
 router = APIRouter()
+
+
+@router.get("/api/v1/events/me/upcoming", response_model=list[EventWithClubResponse])
+def list_my_upcoming_events(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Return upcoming events from all clubs the current user is a member of, with club info."""
+    memberships = db.query(ClubMember).filter(ClubMember.user_id == current_user.uid).all()
+    now = datetime.now(timezone.utc)
+    result: list[EventWithClubResponse] = []
+    seen_ids: set[str] = set()
+    for membership in memberships:
+        club = club_crud.get_club(db, str(membership.club_id))
+        if not club:
+            continue
+        events = event_crud.list_events_for_club(db, club)
+        for ev in events:
+            if str(ev.id) in seen_ids:
+                continue
+            event_start = ev.start_time
+            if event_start.tzinfo is None:
+                event_start = event_start.replace(tzinfo=timezone.utc)
+            if event_start >= now:
+                seen_ids.add(str(ev.id))
+                attendee_count = len(ev.attendees) if ev.attendees is not None else 0
+                is_attending = any(str(a.uid) == str(current_user.uid) for a in (ev.attendees or []))
+                resp = EventWithClubResponse.model_validate(ev)
+                resp.attendee_count = attendee_count
+                resp.is_current_user_attending = is_attending
+                resp.club_id = club.id
+                resp.club_name = club.name
+                resp.club_image_url = club.image_url
+                resp.club_member_count = len(club.members) if club.members is not None else 0
+                result.append(resp)
+    result.sort(key=lambda e: e.start_time)
+    return result[:5]
 
 
 @router.get("/api/v1/clubs/{club_id:uuid}/events", response_model=list[EventResponse])

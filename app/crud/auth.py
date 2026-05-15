@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
+import uuid
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,6 +20,10 @@ from . import club as club_crud
 
 def get_user_by_email(db: Session, email: str):
     return db.query(User).filter(User.email == email).first()
+
+
+def get_user_by_apple_sub(db: Session, apple_sub: str):
+    return db.query(User).filter(User.apple_sub == apple_sub).first()
 
 
 def create_user(db: Session, user_in: UserCreate):
@@ -84,6 +90,71 @@ def login_social_user(
         password_hash=None,
         runner_type=RunnerType(runner_value),
         auth_provider=AuthProvider(provider),
+    )
+    db.add(user)
+
+    try:
+        db.commit()
+        db.refresh(user)
+        club_crud.auto_join_community(db, user)
+        return user
+    except IntegrityError:
+        db.rollback()
+        return None
+
+
+def _synthetic_apple_email(apple_sub: str) -> str:
+    """Stable synthetic address (reserved example.com domain); local part stays short."""
+    digest = hashlib.sha256(apple_sub.encode("utf-8")).hexdigest()[:32]
+    return f"apple.{digest}@example.com"
+
+
+def login_social_user_apple(
+    db: Session,
+    apple_sub: str,
+    email_from_apple: str | None,
+    full_name: str,
+    runner_type,
+):
+    """
+    Find or create a user for Sign in with Apple.
+
+    Subsequent Apple logins often omit `email` in the JWT; we always key off `sub`
+    stored in `apple_sub`.
+    """
+    user = get_user_by_apple_sub(db, apple_sub)
+    if user:
+        if full_name and user.full_name != full_name:
+            user.full_name = full_name
+        user.auth_provider = AuthProvider.apple
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    resolved_email = (email_from_apple or "").strip() or None
+    if resolved_email:
+        existing = get_user_by_email(db, resolved_email)
+        if existing and existing.apple_sub and existing.apple_sub != apple_sub:
+            return None
+        if existing and not existing.apple_sub:
+            return None
+
+    if not resolved_email:
+        resolved_email = _synthetic_apple_email(apple_sub)
+        while get_user_by_email(db, resolved_email):
+            resolved_email = _synthetic_apple_email(f"{apple_sub}.{uuid.uuid4().hex[:8]}")
+
+    resolved_runner_type = runner_type or RunnerType.social_stryder
+    runner_value = resolved_runner_type.value if hasattr(resolved_runner_type, "value") else resolved_runner_type
+
+    user = User(
+        full_name=full_name or "Apple User",
+        email=resolved_email,
+        password_hash=None,
+        runner_type=RunnerType(runner_value),
+        auth_provider=AuthProvider.apple,
+        apple_sub=apple_sub,
     )
     db.add(user)
 

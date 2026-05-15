@@ -1,13 +1,7 @@
 import logging
 import os
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, quote
-import base64
-import json
-import time
-import threading
-from collections import defaultdict, deque
-
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -17,12 +11,14 @@ from ...crud.auth import (
     create_user,
     get_user_by_email,
     login_social_user,
+    login_social_user_apple,
     get_valid_password_reset_token,
     reset_password_with_token,
 )
 from ...lib.db import get_db
 from ...lib.mailer import send_email
 from ...lib.firebase_admin_client import verify_firebase_id_token
+from ...lib.apple_id_token import AppleTokenError, verify_apple_identity_token
 from ...lib.security import (
     RESET_TOKEN_EXPIRE_MINUTES,
     create_access_token,
@@ -44,30 +40,6 @@ from ...schemas.auth import (
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
-_rate_limit_lock = threading.Lock()
-_rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
-
-
-def _client_ip(request: Request) -> str:
-    forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-def _enforce_rate_limit(key: str, max_requests: int, window_seconds: int) -> None:
-    now = time.monotonic()
-    with _rate_limit_lock:
-        bucket = _rate_limit_buckets[key]
-        cutoff = now - window_seconds
-        while bucket and bucket[0] < cutoff:
-            bucket.popleft()
-        if len(bucket) >= max_requests:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many requests. Please try again shortly.",
-            )
-        bucket.append(now)
 
 
 def _build_reset_link(raw_token: str) -> str:
@@ -122,27 +94,8 @@ def _build_reset_bridge_link(raw_token: str) -> str | None:
     return None
 
 
-def _build_expo_go_reset_link(raw_token: str) -> str | None:
-    """
-    Optional Expo Go fallback format.
-    Example env:
-      RESET_PASSWORD_EXPO_GO_URL=exp://192.168.18.15:8081/--/screens/setPassword?token={token}
-    """
-    expo_go_url = (os.getenv("RESET_PASSWORD_EXPO_GO_URL") or "").strip().strip("'\"")
-    if not expo_go_url:
-        return None
-    if "{token}" in expo_go_url:
-        return expo_go_url.replace("{token}", quote(raw_token))
-    parsed = urlparse(expo_go_url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query["token"] = raw_token
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-
 @router.post("/signup", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-def signup(user_in: UserCreate, request: Request, db: Session = Depends(get_db)):
-    _enforce_rate_limit(f"signup:ip:{_client_ip(request)}", max_requests=15, window_seconds=300)
-    _enforce_rate_limit(f"signup:email:{user_in.email.lower()}", max_requests=5, window_seconds=600)
+def signup(user_in: UserCreate, db: Session = Depends(get_db)):
     existing = get_user_by_email(db, user_in.email)
     if existing:
         raise HTTPException(
@@ -160,9 +113,7 @@ def signup(user_in: UserCreate, request: Request, db: Session = Depends(get_db))
 
 
 @router.post("/signin", response_model=Token)
-def signin(form_data: UserSignIn, request: Request, db: Session = Depends(get_db)):
-    _enforce_rate_limit(f"signin:ip:{_client_ip(request)}", max_requests=30, window_seconds=300)
-    _enforce_rate_limit(f"signin:email:{form_data.email.lower()}", max_requests=10, window_seconds=300)
+def signin(form_data: UserSignIn, db: Session = Depends(get_db)):
     # using UserSignIn for simplicity: expects email and password fields
     user = authenticate_user(db, form_data.email, form_data.password)
     if not user:
@@ -198,9 +149,6 @@ def logout():
 
 @router.post("/social-login", response_model=Token)
 async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db)):
-    email = None
-    full_name = None
-
     if request.provider.value == "google":
         try:
             firebase_payload = verify_firebase_id_token(request.token)
@@ -222,68 +170,81 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid Firebase token") from exc
 
-    elif request.provider.value == "apple":
+        user = login_social_user(
+            db=db,
+            email=email,
+            full_name=full_name,
+            runner_type=request.runner_type,
+            provider=request.provider.value,
+        )
+
+        if not user:
+            raise HTTPException(status_code=400, detail="Could not create social account")
+
+        token_payload = {
+            "full_name": user.full_name,
+            "email": user.email,
+            "runner_type": user.runner_type.value,
+        }
+        access_token = create_access_token(token_payload)
+        refresh_token = create_refresh_token({"email": user.email})
+        return {"access_token": access_token, "refresh_token": refresh_token}
+
+    if request.provider.value == "apple":
         try:
-            token_parts = request.token.split(".")
-            if len(token_parts) < 2:
-                raise ValueError("Invalid token format")
-
-            payload_part = token_parts[1]
-            padding = "=" * (-len(payload_part) % 4)
-            decoded = base64.urlsafe_b64decode(payload_part + padding)
-            payload_json = json.loads(decoded.decode("utf-8"))
-
-            email = payload_json.get("email") or payload_json.get("sub")
-            full_name = request.name_from_frontend or "Apple User"
-            if not email:
-                raise HTTPException(status_code=400, detail="Invalid Apple token")
-        except (ValueError, json.JSONDecodeError) as exc:
+            payload = verify_apple_identity_token(request.token)
+            apple_sub = str(payload.get("sub"))
+            email_from_apple = payload.get("email")
+            if isinstance(email_from_apple, str):
+                email_from_apple = email_from_apple.strip() or None
+            else:
+                email_from_apple = None
+            full_name = (request.name_from_frontend or "").strip() or "Apple User"
+            user = login_social_user_apple(
+                db=db,
+                apple_sub=apple_sub,
+                email_from_apple=email_from_apple,
+                full_name=full_name,
+                runner_type=request.runner_type,
+            )
+            if not user:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not create or link Apple account (email may already be in use).",
+                )
+            token_payload = {
+                "full_name": user.full_name,
+                "email": user.email,
+                "runner_type": user.runner_type.value,
+            }
+            access_token = create_access_token(token_payload)
+            refresh_token = create_refresh_token({"email": user.email})
+            return {"access_token": access_token, "refresh_token": refresh_token}
+        except AppleTokenError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid Apple token") from exc
 
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported provider")
-
-    user = login_social_user(
-        db=db,
-        email=email,
-        full_name=full_name,
-        runner_type=request.runner_type,
-        provider=request.provider.value,
-    )
-
-    if not user:
-        raise HTTPException(status_code=400, detail="Could not create social account")
-
-    token_payload = {
-        "full_name": user.full_name,
-        "email": user.email,
-        "runner_type": user.runner_type.value,
-    }
-    access_token = create_access_token(token_payload)
-    refresh_token = create_refresh_token({"email": user.email})
-    return {"access_token": access_token, "refresh_token": refresh_token}
+    raise HTTPException(status_code=400, detail="Unsupported provider")
 
 
 @router.post("/password-reset/request", response_model=MessageResponse)
-def request_password_reset(payload: PasswordResetRequest, request: Request, db: Session = Depends(get_db)):
-    _enforce_rate_limit(f"pwd-reset-request:ip:{_client_ip(request)}", max_requests=20, window_seconds=900)
-    _enforce_rate_limit(f"pwd-reset-request:email:{payload.email.lower()}", max_requests=5, window_seconds=900)
+def request_password_reset(payload: PasswordResetRequest, db: Session = Depends(get_db)):
     user = get_user_by_email(db, payload.email)
     if user:
         raw_token, _reset_token = create_password_reset_token(db, user)
-        expo_go_link = _build_expo_go_reset_link(raw_token)
-        # In current dev flow (Expo Go), prefer exp:// link.
-        email_click_link = expo_go_link or _build_reset_email_link(raw_token)
+        reset_link = _build_reset_link(raw_token)  # stride://... deep link
+        email_click_link = _build_reset_email_link(raw_token)
         bridge_link = _build_reset_bridge_link(raw_token)
-        subject = os.getenv("PASSWORD_RESET_SUBJECT", "Your Stryde reset link")
+        subject = os.getenv("PASSWORD_RESET_SUBJECT", "Reset your Stryde password")
         body_parts = [
-            "Your Stryde reset link:\n\n",
-            f"{email_click_link}\n\n",
+            "We received a request to reset your password.\n\n",
+            f"Open this reset link: {email_click_link}\n\n",
         ]
         if bridge_link:
             body_parts.append(f"If that doesn't work, open: {bridge_link}\n\n")
-        if expo_go_link:
-            body_parts.append(f"Expo Go fallback link: {expo_go_link}\n\n")
         body_parts.extend(
             [
                 f"This link expires in {RESET_TOKEN_EXPIRE_MINUTES} minutes.\n",
@@ -296,15 +257,10 @@ def request_password_reset(payload: PasswordResetRequest, request: Request, db: 
             if bridge_link
             else ""
         )
-        expo_go_fallback_html = (
-            f'<p>Expo Go fallback:<br /><a href="{expo_go_link}">{expo_go_link}</a></p>'
-            if expo_go_link
-            else ""
-        )
         html_body = f"""
         <html>
-          <body style="font-family: Arial, sans-serif; color: #201E1F; line-height: 1.5; padding: 16px;">
-            <p><strong>Your Stryde reset link</strong></p>
+          <body style="font-family: Arial, sans-serif; color: #201E1F; line-height: 1.5;">
+            <p>We received a request to reset your password.</p>
             <p>
               <a
                 href="{email_click_link}"
@@ -313,10 +269,14 @@ def request_password_reset(payload: PasswordResetRequest, request: Request, db: 
                 Reset Password
               </a>
             </p>
-            <p><a href="{email_click_link}">{email_click_link}</a></p>
-            {expo_go_fallback_html}
+            <p>
+              If the button does not work, copy and open this link:<br />
+              <a href="{email_click_link}">{email_click_link}</a>
+            </p>
             {bridge_fallback_html}
+            <p>Direct app link:<br /><a href="{reset_link}">{reset_link}</a></p>
             <p>This link expires in {RESET_TOKEN_EXPIRE_MINUTES} minutes.</p>
+            <p>If you did not request a password reset, you can ignore this email.</p>
           </body>
         </html>
         """.strip()
@@ -329,8 +289,7 @@ def request_password_reset(payload: PasswordResetRequest, request: Request, db: 
 
 
 @router.post("/password-reset/confirm", response_model=MessageResponse)
-def confirm_password_reset(payload: PasswordResetConfirm, request: Request, db: Session = Depends(get_db)):
-    _enforce_rate_limit(f"pwd-reset-confirm:ip:{_client_ip(request)}", max_requests=30, window_seconds=900)
+def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(get_db)):
     token_hash = hash_password_reset_token(payload.token)
     reset_token = get_valid_password_reset_token(db, token_hash)
     if not reset_token:
@@ -342,7 +301,7 @@ def confirm_password_reset(payload: PasswordResetConfirm, request: Request, db: 
 
 @router.get("/password-reset/open", response_class=HTMLResponse)
 def open_password_reset(token: str):
-    app_link = _build_expo_go_reset_link(token) or _build_reset_link(token)
+    app_link = _build_reset_link(token)
     html = f"""
     <!doctype html>
     <html>
@@ -351,12 +310,15 @@ def open_password_reset(token: str):
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Open Stryde Reset</title>
       </head>
-      <body style="font-family: Arial, sans-serif; padding: 24px; display:flex; justify-content:center; align-items:center; min-height:100vh;">
-        <div>
+      <body style="font-family: Arial, sans-serif; padding: 24px;">
+        <h3>Opening Stryde...</h3>
+        <p>If the app does not open automatically, tap the button below.</p>
+        <p>
           <a href="{app_link}" style="display:inline-block;padding:12px 18px;background:#201E1F;color:#E5E0D8;text-decoration:none;border-radius:8px;">
-            Reset Password
+            Open Reset Screen
           </a>
-        </div>
+        </p>
+        <p style="word-break: break-all;">{app_link}</p>
         <script>
           window.location.href = "{app_link}";
         </script>

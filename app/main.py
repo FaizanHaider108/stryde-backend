@@ -1,11 +1,14 @@
 import logging
 import os
+import json
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+import uuid
 from pathlib import Path
 from sqlalchemy.exc import SQLAlchemyError
 from fastapi.encoders import jsonable_encoder
@@ -26,8 +29,50 @@ from .api.v1.subscription import router as subscription_router
 from .lib.db import Base, engine
 
 logger = logging.getLogger(__name__)
+uvicorn_logger = logging.getLogger("uvicorn.error")
+_DEBUG_LOG_PATH = "debug-e6c601.log"
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+	# region agent log
+	try:
+		payload = {
+			"sessionId": "e6c601",
+			"runId": "pre-fix",
+			"hypothesisId": hypothesis_id,
+			"location": location,
+			"message": message,
+			"data": data,
+			"timestamp": int(time.time() * 1000),
+		}
+		with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as fp:
+			fp.write(json.dumps(payload) + "\n")
+	except Exception:
+		pass
+	# endregion
 
 app = FastAPI(title="Stryde Backend", redirect_slashes=False)
+_debug_log("H1", "app/main.py:51", "app_initialized", {"initial_routes": len(app.routes)})
+
+
+def _register_routers() -> None:
+	app.include_router(auth_router.router)
+	app.include_router(profile_router.router)
+	app.include_router(club_router.router)
+	app.include_router(event_router.router)
+	app.include_router(route_router.router)
+	app.include_router(run_router.router)
+	app.include_router(race_router.router)
+	app.include_router(post_router.router)
+	app.include_router(chat_router.router)
+	app.include_router(notifications_router.router)
+	app.include_router(upload_router.router)
+	app.include_router(plan_router.router)
+	app.include_router(subscription_router)
+	_debug_log("H4", "app/main.py:66", "routers_registered_at_init", {"routes_after_register": len(app.routes)})
+
+
+_register_routers()
 
 def _load_cors_origins() -> list[str]:
 	raw = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
@@ -50,6 +95,16 @@ app.add_middleware(
 	allow_methods=["*"],
 	allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_trace_middleware(request: Request, call_next):
+	request_id = str(uuid.uuid4())[:8]
+	uvicorn_logger.info("[REQ %s] %s %s", request_id, request.method, request.url.path)
+	response = await call_next(request)
+	uvicorn_logger.info("[RES %s] %s %s -> %s", request_id, request.method, request.url.path, response.status_code)
+	return response
+
 
 _ERROR_MESSAGE_MAP = {
 	"club not found": "The requested club could not be found.",
@@ -133,6 +188,7 @@ def _create_tables() -> None:
 
 @app.on_event("startup")
 def on_startup():
+	_debug_log("H2", "app/main.py:157", "startup_enter", {"routes_before_startup": len(app.routes)})
 	strict_startup = os.getenv("DB_STARTUP_STRICT", "false").lower() in {"1", "true", "yes", "on"}
 	verbose_startup_errors = os.getenv("DB_STARTUP_VERBOSE_ERRORS", "false").lower() in {"1", "true", "yes", "on"}
 	try:
@@ -152,19 +208,7 @@ def on_startup():
 			"or DB_STARTUP_STRICT=true to fail startup."
 		)
 
-	app.include_router(auth_router.router)
-	app.include_router(profile_router.router)
-	app.include_router(club_router.router)
-	app.include_router(event_router.router)
-	app.include_router(route_router.router)
-	app.include_router(run_router.router)
-	app.include_router(race_router.router)
-	app.include_router(post_router.router)
-	app.include_router(chat_router.router)
-	app.include_router(notifications_router.router)
-	app.include_router(upload_router.router)
-	app.include_router(plan_router.router)
-	app.include_router(subscription_router)
+	_debug_log("H3", "app/main.py:191", "startup_completed_without_router_registration", {"routes_after_startup": len(app.routes)})
 
 
 @app.get("/api/v1/health")

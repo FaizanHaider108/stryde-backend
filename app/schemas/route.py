@@ -8,6 +8,7 @@ from app.models.route import EnvironmentEnum, TerrainEnum, ElevationProfileEnum
 class RouteCoordinate(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
+    elevation_m: Optional[float] = None
 
 class RouteBase(BaseModel):
     name: Optional[str] = None
@@ -42,3 +43,5 @@ class RouteCreateResponse(BaseModel):
     distance_km: float
     duration_seconds: float
     elevation_gain_m: Optional[float] = None
+    elevation_loss_m: Optional[float] = None
+    surface_types: Optional[List[str]] = None

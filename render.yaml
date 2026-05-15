@@ -1,0 +1,24 @@
+# Optional: deploy on Render (https://render.com) — connect repo, set env vars in dashboard.
+services:
+  - type: web
+    name: stryde-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: RESET_TOKEN_SECRET
+        generateValue: true
+      - key: BACKEND_PUBLIC_URL
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        value: "*"
+      - key: APPLE_CLIENT_ID
+        value: com.strydelabs.app
+      - key: PORT
+        value: "8000"

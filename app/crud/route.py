@@ -17,44 +17,72 @@ from ..schemas.route import RouteCreate, RouteSave
 from ..models.route import EnvironmentEnum, TerrainEnum, ElevationProfileEnum
 
 GRAPHHOPPER_API_KEY = os.getenv("GRAPHHOPPER_API_KEY")
-OSRM_BASE_URL = "https://routing.openstreetmap.de/routed-foot/route/v1/foot"
-OSRM_NEAREST_URL = "https://routing.openstreetmap.de/routed-foot/nearest/v1/foot"
+
+# Detour / multi-leg OSRM: reject midpoint snaps that jump too far (wrong side of block → chords).
+MIDPOINT_MAX_SNAP_DRIFT_M = 150.0
+
+OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
+OPEN_ELEVATION_BATCH = 100
+
+
+def _osrm_route_base(terrain_pref: object | None) -> str:
+    """OSRM public instance: bike routing is closer to trail networks when terrain is unpaved."""
+    if terrain_pref == "unpaved" or terrain_pref == TerrainEnum.unpaved:
+        return "https://routing.openstreetmap.de/routed-bike/route/v1/bike"
+    return "https://routing.openstreetmap.de/routed-foot/route/v1/foot"
+
+
+def _osrm_nearest_base(terrain_pref: object | None) -> str:
+    if terrain_pref == "unpaved" or terrain_pref == TerrainEnum.unpaved:
+        return "https://routing.openstreetmap.de/routed-bike/nearest/v1/bike"
+    return "https://routing.openstreetmap.de/routed-foot/nearest/v1/foot"
 
 
 def _build_graphhopper_custom_model(payload: RouteCreate) -> dict:
-    terrain_pref = getattr(payload, 'terrain', None)
+    terrain_pref = getattr(payload, "terrain", None)
+    elevation_pref = getattr(payload, "elevation_profile", None)
     prefers_unpaved = terrain_pref == "unpaved" or terrain_pref == TerrainEnum.unpaved
+    wants_flat = elevation_pref == "flat" or elevation_pref == ElevationProfileEnum.flat
 
-    # Strong bonuses for pedestrian/local roads; heavy penalties for arterials/highways.
-    # distance_influence=30 (down from 70) makes GH willing to take longer paths through
-    # side streets rather than cutting straight across on major roads.
-    priority_rules = [
-        {"if": "road_class == FOOTWAY",      "multiply_by": 2.3},
-        {"if": "road_class == PATH",          "multiply_by": 2.1},
-        {"if": "road_class == CYCLEWAY",      "multiply_by": 1.9},
-        {"if": "road_class == PEDESTRIAN",    "multiply_by": 1.9},
-        {"if": "road_class == LIVING_STREET", "multiply_by": 1.75},
-        {"if": "road_class == RESIDENTIAL",   "multiply_by": 1.55},
-        {"if": "road_class == UNCLASSIFIED",  "multiply_by": 1.35},
-        {"if": "road_class == SERVICE",       "multiply_by": 1.2},
-        {"if": "road_class == TRACK",         "multiply_by": 1.15 if prefers_unpaved else 0.8},
-        {"if": "road_class == TERTIARY",      "multiply_by": 0.85},
-        {"if": "road_class == SECONDARY",     "multiply_by": 0.65},
-        {"if": "road_class == PRIMARY",       "multiply_by": 0.35},
-        {"if": "road_class == TRUNK",         "multiply_by": 0.15},
-        {"if": "road_class == MOTORWAY",      "multiply_by": 0.01},
+    # Tuned for street-level running: continuous pavements and paths; avoid busy arterials.
+    priority_rules: list[dict[str, str]] = [
+        {"if": "road_class == FOOTWAY", "multiply_by": "1.5"},
+        {"if": "road_class == PATH", "multiply_by": "1.3"},
+        {"if": "road_class == CYCLEWAY", "multiply_by": "1.2"},
+        {"if": "road_class == RESIDENTIAL", "multiply_by": "1.1"},
+        {"if": "road_class == LIVING_STREET", "multiply_by": "1.1"},
+        {"if": "road_class == PEDESTRIAN", "multiply_by": "1.15"},
+        {"if": "road_class == UNCLASSIFIED", "multiply_by": "1.0"},
+        {"if": "road_class == SERVICE", "multiply_by": "0.95"},
+        {"if": "road_class == TERTIARY", "multiply_by": "0.85"},
+        {"if": "road_class == SECONDARY", "multiply_by": "0.7"},
+        {"if": "road_class == PRIMARY", "multiply_by": "0.5"},
+        {"if": "road_class == TRUNK", "multiply_by": "0.3"},
+        {"if": "road_class == MOTORWAY", "multiply_by": "0.05"},
     ]
 
     if prefers_unpaved:
-        priority_rules.extend([
-            {"if": "surface == UNPAVED", "multiply_by": 1.2},
-            {"if": "surface == GRAVEL",  "multiply_by": 1.15},
-        ])
+        priority_rules.append({"if": "road_class == TRACK", "multiply_by": "1.4"})
     else:
-        priority_rules.extend([
-            {"if": "surface == ASPHALT", "multiply_by": 1.05},
-            {"if": "surface == PAVED",   "multiply_by": 1.05},
-        ])
+        priority_rules.append({"if": "road_class == TRACK", "multiply_by": "0.75"})
+
+    if wants_flat:
+        priority_rules.append({"if": "average_slope > 5", "multiply_by": "0.6"})
+
+    if prefers_unpaved:
+        priority_rules.extend(
+            [
+                {"if": "surface == UNPAVED", "multiply_by": "1.2"},
+                {"if": "surface == GRAVEL", "multiply_by": "1.15"},
+            ]
+        )
+    else:
+        priority_rules.extend(
+            [
+                {"if": "surface == ASPHALT", "multiply_by": "1.05"},
+                {"if": "surface == PAVED", "multiply_by": "1.05"},
+            ]
+        )
 
     return {
         "priority": priority_rules,
@@ -82,6 +110,62 @@ def _decode_polyline(encoded: str, precision: int = 5) -> list[dict]:
         points.append({'latitude': lat / factor, 'longitude': lng / factor})
 
     return points
+
+
+def _graphhopper_points_to_coords(gh_points: object) -> list[dict]:
+    """Decode GraphHopper `points`: encoded string or GeoJSON with optional elevation (m)."""
+    if isinstance(gh_points, str):
+        return _decode_polyline(gh_points)
+    if not isinstance(gh_points, dict):
+        return []
+    coordinates = gh_points.get("coordinates") or []
+    out: list[dict] = []
+    for c in coordinates:
+        if not isinstance(c, (list, tuple)) or len(c) < 2:
+            continue
+        lng, lat = float(c[0]), float(c[1])
+        item: dict = {"latitude": lat, "longitude": lng}
+        if len(c) >= 3 and c[2] is not None:
+            try:
+                item["elevation_m"] = float(c[2])
+            except (TypeError, ValueError):
+                pass
+        out.append(item)
+    return out
+
+
+def _surface_types_from_gh_path(path: dict) -> list[str] | None:
+    details = path.get("details") or {}
+    surface = details.get("surface")
+    if not isinstance(surface, list):
+        return None
+    ordered: list[str] = []
+    for interval in surface:
+        if isinstance(interval, (list, tuple)) and len(interval) >= 3:
+            label = interval[2]
+            if isinstance(label, str) and label and label not in ordered:
+                ordered.append(label)
+    return ordered or None
+
+
+def _compute_elevation_stats(coords: list[dict]) -> tuple[float | None, float | None]:
+    gain = 0.0
+    loss = 0.0
+    used_any = False
+    for i in range(1, len(coords)):
+        e0 = coords[i - 1].get("elevation_m")
+        e1 = coords[i].get("elevation_m")
+        if e0 is None or e1 is None:
+            continue
+        used_any = True
+        delta = float(e1) - float(e0)
+        if delta > 0:
+            gain += delta
+        else:
+            loss += abs(delta)
+    if not used_any:
+        return None, None
+    return round(gain, 1), round(loss, 1)
 
 
 def _decode_value(encoded: str, index: int, factor: int) -> dict:
@@ -116,10 +200,136 @@ def _haversine_distance_km(lat1: float, lng1: float, lat2: float, lng2: float) -
 
 def _distance_tolerance_km(target_km: float) -> float:
     """
-    Strict tolerance for user-requested distance in location-to-location routing.
-    Keep generated route close to the requested distance; otherwise fail clearly.
+    How close the generated path length must be to the user's requested distance (km).
+    Tight enough that a 5 km request cannot silently return ~1.6 km.
     """
-    return max(0.25, target_km * 0.05)
+    return max(0.2, target_km * 0.04)
+
+
+def _distance_max_overshoot_km(target_km: float) -> float:
+    """Soft cap — prefer routes under this excess length when choosing among candidates."""
+    return max(2.0, target_km * 0.6)
+
+
+def _polyline_length_km(coords: list[dict]) -> float:
+    """Ground distance along a polyline (haversine per segment), in km."""
+    if len(coords) < 2:
+        return 0.0
+    total = 0.0
+    for i in range(1, len(coords)):
+        a = coords[i - 1]
+        b = coords[i]
+        total += _haversine_distance_km(
+            float(a["latitude"]),
+            float(a["longitude"]),
+            float(b["latitude"]),
+            float(b["longitude"]),
+        )
+    return total
+
+
+def _coords_for_self_intersection_test(coords: list[dict], max_segments: int = 900) -> list[tuple[float, float]]:
+    """Down-sample long polylines so intersection tests stay fast on mobile CPUs."""
+    if len(coords) < 2:
+        return []
+    if len(coords) <= max_segments + 1:
+        return [(float(c["latitude"]), float(c["longitude"])) for c in coords]
+    n = len(coords)
+    out: list[tuple[float, float]] = []
+    for k in range(max_segments + 1):
+        idx = min(int(round(k * (n - 1) / max_segments)), n - 1)
+        c = coords[idx]
+        out.append((float(c["latitude"]), float(c["longitude"])))
+    return out
+
+
+def _segment_intersects_open(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    cx: float,
+    cy: float,
+    dx: float,
+    dy: float,
+) -> bool:
+    """True if closed segments AB and CD intersect (including proper colinear overlap)."""
+
+    def orient(px: float, py: float, qx: float, qy: float, rx: float, ry: float) -> float:
+        return (qy - py) * (rx - qx) - (qx - px) * (ry - qy)
+
+    def on_segment(px: float, py: float, qx: float, qy: float, rx: float, ry: float, eps: float = 1e-10) -> bool:
+        return (
+            min(px, rx) - eps <= qx <= max(px, rx) + eps
+            and min(py, ry) - eps <= qy <= max(py, ry) + eps
+        )
+
+    o1 = orient(ax, ay, bx, by, cx, cy)
+    o2 = orient(ax, ay, bx, by, dx, dy)
+    o3 = orient(cx, cy, dx, dy, ax, ay)
+    o4 = orient(cx, cy, dx, dy, bx, by)
+
+    if o1 == 0 and on_segment(ax, ay, cx, cy, bx, by):
+        return True
+    if o2 == 0 and on_segment(ax, ay, dx, dy, bx, by):
+        return True
+    if o3 == 0 and on_segment(cx, cy, ax, ay, dx, dy):
+        return True
+    if o4 == 0 and on_segment(cx, cy, bx, by, dx, dy):
+        return True
+
+    return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
+
+
+def _polyline_self_intersects(coords: list[dict]) -> bool:
+    """
+    Detect self-intersection / bow-ties on the route polyline (non-adjacent segments
+    that cross). Adjacent segments sharing a vertex are ignored.
+    """
+    pts = _coords_for_self_intersection_test(coords)
+    n = len(pts)
+    if n < 4:
+        return False
+    for i in range(n - 1):
+        ax, ay = pts[i]
+        bx, by = pts[i + 1]
+        for j in range(i + 2, n - 1):
+            cx, cy = pts[j]
+            dx, dy = pts[j + 1]
+            if _segment_intersects_open(ax, ay, bx, by, cx, cy, dx, dy):
+                return True
+    return False
+
+
+async def _finalize_route_geometry(route: dict) -> dict:
+    """
+    Recompute distance and elevation stats from the router polyline.
+
+    Snapped start/end pins are already on the network; we do not replace the first/last
+    vertices with raw user pins (that used to draw straight segments through buildings).
+
+    OSRM polylines have no elevation — enrich via Open-Elevation when no point has elevation_m.
+    """
+    coords = list(route.get("map_data") or [])
+    if len(coords) >= 2 and not _polyline_has_point_elevation(coords):
+        coords = await _enrich_elevation_open_elevation(coords)
+
+    new_len = _polyline_length_km(coords) if len(coords) >= 2 else 0.0
+    new_route = {**route, "map_data": coords, "distance_km": round(new_len, 2)}
+
+    gain_poly, loss_poly = _compute_elevation_stats(coords)
+    if gain_poly is not None:
+        new_route["elevation_gain_m"] = gain_poly
+        new_route["elevation_loss_m"] = loss_poly
+    elif new_route.get("elevation_loss_m") is None:
+        new_route["elevation_loss_m"] = None
+
+    return new_route
+
+
+def _route_meets_target_length(distance_km: float, target_km: float) -> bool:
+    """User-requested distance is a minimum target (within tolerance). Longer routes are OK."""
+    return distance_km >= target_km - _distance_tolerance_km(target_km)
 
 
 def _route_backtrack_penalty(coords: list[dict]) -> float:
@@ -158,33 +368,22 @@ def _route_backtrack_penalty(coords: list[dict]) -> float:
 
 
 def _normalize_route_coordinates(payload: RouteCreate) -> tuple[float, float, float, float]:
-    original = (payload.start_lat, payload.start_lng, payload.end_lat, payload.end_lng)
-    candidates = [original]
+    """
+    Only correct individual coordinate pairs where lat and lng are clearly
+    reversed (|lat| > 90 but |lng| <= 90). Never rearrange or swap the
+    start/end points with each other — the user chose them explicitly.
+    """
+    start_lat = float(payload.start_lat)
+    start_lng = float(payload.start_lng)
+    end_lat = float(payload.end_lat)
+    end_lng = float(payload.end_lng)
 
-    if abs(payload.start_lng) <= 90 and abs(payload.start_lat) <= 180:
-        candidates.append((payload.start_lng, payload.start_lat, payload.end_lat, payload.end_lng))
-    if abs(payload.end_lng) <= 90 and abs(payload.end_lat) <= 180:
-        candidates.append((payload.start_lat, payload.start_lng, payload.end_lng, payload.end_lat))
-    if abs(payload.start_lng) <= 90 and abs(payload.start_lat) <= 180 and abs(payload.end_lng) <= 90 and abs(payload.end_lat) <= 180:
-        candidates.append((payload.start_lng, payload.start_lat, payload.end_lng, payload.end_lat))
+    if abs(start_lat) > 90 and abs(start_lng) <= 90:
+        start_lat, start_lng = start_lng, start_lat
+    if abs(end_lat) > 90 and abs(end_lng) <= 90:
+        end_lat, end_lng = end_lng, end_lat
 
-    def geo_distance(candidate: tuple[float, float, float, float]) -> float:
-        return _haversine_distance_km(candidate[0], candidate[1], candidate[2], candidate[3])
-
-    original_geo_km = geo_distance(original)
-    best_candidate = min(candidates, key=geo_distance)
-    best_geo_km = geo_distance(best_candidate)
-    target_km = float(payload.distance_km)
-
-    if (
-        best_candidate != original
-        and original_geo_km > max(target_km * 5, 30)
-        and best_geo_km < original_geo_km * 0.2
-        and best_geo_km <= max(target_km * 3, 20)
-    ):
-        return best_candidate
-
-    return original
+    return start_lat, start_lng, end_lat, end_lng
 
 
 def _extract_graphhopper_error_detail(exc: httpx.HTTPStatusError) -> str:
@@ -265,7 +464,7 @@ def _build_detour_candidate_point_sets(
     end_pt = _format_point(end_lat, end_lng)
 
     for side in (-1, 1):
-        for scale in (0.4, 0.6, 0.85, 1.1, 1.35, 1.7, 2.1, 2.6, 3.2):
+        for scale in (0.4, 0.55, 0.7, 0.85, 1.05, 1.25, 1.5, 1.8, 2.2, 2.7, 3.3, 4.0, 5.0, 6.5, 8.5, 11.0):
             offset_km = offset_base_km * scale
             midpoint = _offset_point_along_segment(
                 start_lat,
@@ -312,13 +511,14 @@ def _build_detour_candidate_point_sets(
     return candidates
 
 
-async def _request_osrm_route_for_points(points: list[str]) -> dict:
+async def _request_osrm_route_for_points(points: list[str], terrain_pref: object | None = None) -> dict:
     osrm_coordinates = []
     for point in points:
         lat_str, lng_str = point.split(",")
         osrm_coordinates.append(f"{lng_str},{lat_str}")
 
-    url = f"{OSRM_BASE_URL}/" + ";".join(osrm_coordinates)
+    base = _osrm_route_base(terrain_pref)
+    url = f"{base}/" + ";".join(osrm_coordinates)
     params = {
         "overview": "full",
         "geometries": "geojson",
@@ -348,11 +548,19 @@ async def _request_osrm_route_for_points(points: list[str]) -> dict:
         "distance_km": round(best_route["distance"] / 1000, 2),
         "duration_seconds": int(best_route["duration"]),
         "elevation_gain_m": None,
+        "elevation_loss_m": None,
+        "surface_types": None,
     }
 
 
-async def _request_osrm_nearest(lat: float, lng: float) -> tuple[float, float] | None:
-    url = f"{OSRM_NEAREST_URL}/{lng},{lat}"
+async def _request_osrm_nearest(
+    lat: float,
+    lng: float,
+    terrain_pref: object | None = None,
+    max_snap_km: float | None = 0.2,
+) -> tuple[float, float] | None:
+    base = _osrm_nearest_base(terrain_pref)
+    url = f"{base}/{lng},{lat}"
     params = {"number": 1}
 
     try:
@@ -376,85 +584,238 @@ async def _request_osrm_nearest(lat: float, lng: float) -> tuple[float, float] |
         return None
 
     snap_dist_km = _haversine_distance_km(lat, lng, float(snapped_lat), float(snapped_lng))
-    if snap_dist_km > 0.2:
+    if max_snap_km is not None and snap_dist_km > max_snap_km:
         return None
 
     return float(snapped_lat), float(snapped_lng)
 
 
+async def _snap_to_nearest_walkable_node(
+    lat: float,
+    lng: float,
+    terrain_pref: object | None = None,
+) -> tuple[float, float]:
+    """Snap a pin to the closest routable edge (no max-distance rejection; returns original on failure)."""
+    base = _osrm_nearest_base(terrain_pref)
+    url = f"{base}/{lng},{lat}"
+    params = {"number": 1}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return lat, lng
+
+    waypoints = data.get("waypoints") or []
+    if not waypoints:
+        return lat, lng
+    loc = waypoints[0].get("location")
+    if not (isinstance(loc, list) and len(loc) >= 2):
+        return lat, lng
+    snapped_lng, snapped_lat = loc[0], loc[1]
+    if not (isinstance(snapped_lat, (int, float)) and isinstance(snapped_lng, (int, float))):
+        return lat, lng
+    return float(snapped_lat), float(snapped_lng)
+
+
+async def _snap_detour_midpoints_for_osrm(
+    points: list[tuple[float, float]],
+    terrain_pref: object | None,
+) -> list[tuple[float, float] | None]:
+    """
+    Snap each candidate waypoint to the nearest routable edge; return None if the snap
+    moved the point too far (likely wrong road / far side of a block). Callers must
+    drop None entries instead of routing through raw offset coordinates.
+    """
+    out: list[tuple[float, float] | None] = []
+    for lat, lng in points:
+        s_lat, s_lng = await _snap_to_nearest_walkable_node(lat, lng, terrain_pref)
+        dist_m = _haversine_distance_km(lat, lng, s_lat, s_lng) * 1000.0
+        if dist_m > MIDPOINT_MAX_SNAP_DRIFT_M:
+            out.append(None)
+        else:
+            out.append((s_lat, s_lng))
+    return out
+
+
+def _polyline_has_point_elevation(coords: list[dict]) -> bool:
+    return any(c.get("elevation_m") is not None for c in coords)
+
+
+async def _enrich_elevation_open_elevation(coords: list[dict]) -> list[dict]:
+    """Fill elevation_m on coordinates using Open-Elevation (batch POST)."""
+    if not coords:
+        return coords
+    out = [dict(c) for c in coords]
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            for start in range(0, len(out), OPEN_ELEVATION_BATCH):
+                chunk = out[start : start + OPEN_ELEVATION_BATCH]
+                locations = [
+                    {"latitude": float(c["latitude"]), "longitude": float(c["longitude"])}
+                    for c in chunk
+                ]
+                resp = await client.post(OPEN_ELEVATION_URL, json={"locations": locations})
+                if resp.status_code != 200:
+                    continue
+                results = (resp.json() or {}).get("results") or []
+                for j, r in enumerate(results):
+                    idx = start + j
+                    if idx >= len(out):
+                        break
+                    ele = r.get("elevation")
+                    if isinstance(ele, (int, float)):
+                        out[idx]["elevation_m"] = float(ele)
+    except Exception:
+        return coords
+    return out
+
+
 async def _request_osrm_route(payload: RouteCreate) -> dict:
-    return await _request_osrm_route_for_points([
-        _format_point(payload.start_lat, payload.start_lng),
-        _format_point(payload.end_lat, payload.end_lng),
-    ])
+    terrain_pref = getattr(payload, "terrain", None)
+    return await _request_osrm_route_for_points(
+        [
+            _format_point(payload.start_lat, payload.start_lng),
+            _format_point(payload.end_lat, payload.end_lng),
+        ],
+        terrain_pref,
+    )
 
 
 async def _request_osrm_distance_constrained_route(payload: RouteCreate) -> dict:
+    terrain_pref = getattr(payload, "terrain", None)
     direct_route = await _request_osrm_route(payload)
     target_km = float(payload.distance_km)
-    tolerance_km = _distance_tolerance_km(target_km)
+    tol = _distance_tolerance_km(target_km)
 
-    if direct_route["distance_km"] > target_km + tolerance_km:
+    if _route_meets_target_length(direct_route["distance_km"], target_km) and not _polyline_self_intersects(
+        direct_route["map_data"]
+    ):
+        return direct_route
+
+    raw_candidates = _build_detour_candidate_point_sets(payload, direct_route["distance_km"])
+
+    best_route: Optional[dict] = None
+    best_key: tuple = (9, 0.0, 0.0, 0.0)
+    if not _polyline_self_intersects(direct_route["map_data"]):
+        best_route = direct_route
+        d0 = direct_route["distance_km"]
+        if _route_meets_target_length(d0, target_km):
+            gap0 = abs(d0 - target_km)
+            cap0 = target_km + _distance_max_overshoot_km(target_km)
+            over0 = max(0.0, d0 - cap0)
+            best_key = (0, gap0, over0, _route_backtrack_penalty(direct_route["map_data"]) * 0.02)
+        else:
+            best_key = (1, -d0, 0.0, 0.0)
+
+    async def evaluate_snap_mode(snap_mids: bool) -> None:
+        nonlocal best_route, best_key
+        snap_map: dict[str, str] = {}
+        if snap_mids:
+            unique_mids: dict[str, tuple[float, float]] = {}
+            for cand in raw_candidates:
+                for pt in cand[1:-1]:
+                    if pt not in unique_mids:
+                        lat_s, lng_s = pt.split(",")
+                        unique_mids[pt] = (float(lat_s), float(lng_s))
+            if unique_mids:
+                snapped_coords = await _snap_detour_midpoints_for_osrm(list(unique_mids.values()), terrain_pref)
+                snap_map = {}
+                for orig, sc in zip(unique_mids.keys(), snapped_coords):
+                    if sc is not None:
+                        snap_map[orig] = _format_point(*sc)
+
+        for raw_candidate in raw_candidates:
+            if snap_mids and snap_map:
+                candidate_points = [raw_candidate[0]]
+                for pt in raw_candidate[1:-1]:
+                    if pt in snap_map:
+                        candidate_points.append(snap_map[pt])
+                candidate_points.append(raw_candidate[-1])
+            else:
+                candidate_points = list(raw_candidate)
+
+            try:
+                candidate_route = await _request_osrm_route_for_points(candidate_points, terrain_pref)
+            except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
+                continue
+
+            if _polyline_self_intersects(candidate_route["map_data"]):
+                continue
+
+            d = candidate_route["distance_km"]
+            meets = _route_meets_target_length(d, target_km)
+            gap = abs(d - target_km) if meets else 0.0
+            if meets:
+                cap = target_km + _distance_max_overshoot_km(target_km)
+                over = max(0.0, d - cap)
+                key = (0, gap, over, _route_backtrack_penalty(candidate_route["map_data"]) * 0.02)
+            else:
+                key = (1, -d, 0.0, 0.0)
+
+            if best_route is None or key < best_key:
+                best_route = candidate_route
+                best_key = key
+
+            if meets and gap <= tol:
+                return
+
+    await evaluate_snap_mode(False)
+    if best_route is None or not _route_meets_target_length(best_route["distance_km"], target_km):
+        await evaluate_snap_mode(True)
+
+    if best_route is None or not _route_meets_target_length(best_route["distance_km"], target_km):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"The selected start and end points already require {direct_route['distance_km']} km, "
-                f"which is longer than the requested {round(target_km, 2)} km."
+                f"Could not build a foot route of at least {target_km - tol:.2f} km "
+                f"(target {target_km:.2f} km) between these pins. "
+                "Try moving start/end slightly apart, increasing the target distance, or choosing different pins."
             ),
         )
 
-    if abs(direct_route["distance_km"] - target_km) <= tolerance_km:
-        return direct_route
-
-    best_route = direct_route
-    best_gap = abs(direct_route["distance_km"] - target_km)
-
-    # Collect all unique intermediate waypoints from every candidate set, then
-    # snap them all to local roads in one Overpass call.  This steers the router
-    # onto residential streets / footpaths rather than the nearest arterial.
-    raw_candidates = _build_detour_candidate_point_sets(payload, direct_route["distance_km"])
-    unique_mids: dict[str, tuple[float, float]] = {}
-    for cand in raw_candidates:
-        for pt in cand[1:-1]:
-            if pt not in unique_mids:
-                lat_s, lng_s = pt.split(",")
-                unique_mids[pt] = (float(lat_s), float(lng_s))
-
-    if unique_mids:
-        snapped_coords = await _snap_waypoints_to_routable_roads(list(unique_mids.values()))
-        snap_map = {
-            orig: _format_point(*sc)
-            for orig, sc in zip(unique_mids.keys(), snapped_coords)
-        }
-    else:
-        snap_map = {}
-
-    for raw_candidate in raw_candidates:
-        candidate_points = (
-            [raw_candidate[0]]
-            + [snap_map.get(pt, pt) for pt in raw_candidate[1:-1]]
-            + [raw_candidate[-1]]
+    if _polyline_self_intersects(best_route["map_data"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Could not build a route without the path crossing itself for these pins. "
+                "Try adjusting the start or end point slightly."
+            ),
         )
-        try:
-            candidate_route = await _request_osrm_route_for_points(candidate_points)
-        except (httpx.RequestError, httpx.HTTPStatusError):
-            continue
 
-        candidate_gap = abs(candidate_route["distance_km"] - target_km)
-        if candidate_gap < best_gap:
-            best_route = candidate_route
-            best_gap = candidate_gap
+    return best_route
 
-        if candidate_gap <= tolerance_km:
-            return candidate_route
 
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=(
-            f"Could not find a route between the selected points within ±{round(tolerance_km, 2)} km "
-            f"of {round(target_km, 2)} km. Best available was {best_route['distance_km']} km."
-        ),
-    )
+def _graphhopper_common_route_params(gh_profile: str) -> dict[str, object]:
+    return {
+        "profile": gh_profile,
+        "points_encoded": "false",
+        "elevation": "true",
+        "instructions": "false",
+        "details": ["surface"],
+        "key": GRAPHHOPPER_API_KEY,
+    }
+
+
+def _route_dict_from_graphhopper_path(path: dict) -> dict | None:
+    gh_points = path.get("points")
+    if gh_points is None:
+        return None
+    decoded_coords = _graphhopper_points_to_coords(gh_points)
+    if not decoded_coords:
+        return None
+    elevation_gain_m = path.get("ascend")
+    if elevation_gain_m is not None:
+        elevation_gain_m = round(float(elevation_gain_m), 1)
+    return {
+        "map_data": decoded_coords,
+        "distance_km": round(path["distance"] / 1000, 2),
+        "duration_seconds": int(path["time"] / 1000),
+        "elevation_gain_m": elevation_gain_m,
+        "elevation_loss_m": None,
+        "surface_types": _surface_types_from_gh_path(path),
+    }
 
 
 async def _request_graphhopper_route_for_points(
@@ -466,10 +827,7 @@ async def _request_graphhopper_route_for_points(
 
     base_params: dict[str, object] = {
         "point": points,
-        "profile": gh_profile,
-        "points_encoded": "true",
-        "key": GRAPHHOPPER_API_KEY,
-        "elevation": "false",
+        **_graphhopper_common_route_params(gh_profile),
     }
 
     params_with_custom_model = {
@@ -496,20 +854,21 @@ async def _request_graphhopper_route_for_points(
             detail="Could not generate a route for this location. Please check your start and end points.",
         )
 
-    best_route = data["paths"][0]
-    encoded_polyline = best_route["points"]
-    decoded_coords = _decode_polyline(encoded_polyline)
+    path0 = data["paths"][0]
+    route_dict = _route_dict_from_graphhopper_path(path0)
+    if route_dict is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not generate a route for this location. Please check your start and end points.",
+        )
 
-    elevation_gain_m = best_route.get("ascend")
-    if elevation_gain_m is not None:
-        elevation_gain_m = round(float(elevation_gain_m), 1)
+    if _polyline_self_intersects(route_dict["map_data"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GRAPHOPPER_SELF_INTERSECT",
+        )
 
-    return {
-        "map_data": decoded_coords,
-        "distance_km": round(best_route["distance"] / 1000, 2),
-        "duration_seconds": int(best_route["time"] / 1000),
-        "elevation_gain_m": elevation_gain_m,
-    }
+    return route_dict
 
 
 async def _request_graphhopper_distance_constrained_route(
@@ -524,14 +883,11 @@ async def _request_graphhopper_distance_constrained_route(
 
     base_params: dict[str, object] = {
         "point": [start_pt, end_pt],
-        "profile": gh_profile,
-        "points_encoded": "true",
-        "key": GRAPHHOPPER_API_KEY,
-        "elevation": "false",
+        **_graphhopper_common_route_params(gh_profile),
         "algorithm": "alternative_route",
-        "alternative_route.max_paths": 4,
-        "alternative_route.max_weight_factor": 1.8,
-        "alternative_route.max_share_factor": 0.65,
+        "alternative_route.max_paths": 8,
+        "alternative_route.max_weight_factor": 4.0,
+        "alternative_route.max_share_factor": 0.55,
     }
 
     params_with_custom_model = {
@@ -561,21 +917,10 @@ async def _request_graphhopper_distance_constrained_route(
 
     converted_routes: list[dict] = []
     for path in paths:
-        encoded_polyline = path.get("points")
-        if not encoded_polyline:
+        route_dict = _route_dict_from_graphhopper_path(path)
+        if route_dict is None:
             continue
-        decoded_coords = _decode_polyline(encoded_polyline)
-        elevation_gain_m = path.get("ascend")
-        if elevation_gain_m is not None:
-            elevation_gain_m = round(float(elevation_gain_m), 1)
-        converted_routes.append(
-            {
-                "map_data": decoded_coords,
-                "distance_km": round(path["distance"] / 1000, 2),
-                "duration_seconds": int(path["time"] / 1000),
-                "elevation_gain_m": elevation_gain_m,
-            }
-        )
+        converted_routes.append(route_dict)
 
     if not converted_routes:
         raise HTTPException(
@@ -583,22 +928,27 @@ async def _request_graphhopper_distance_constrained_route(
             detail="Generated route data was invalid for this location.",
         )
 
+    clean_routes = [r for r in converted_routes if not _polyline_self_intersects(r["map_data"])]
+    if not clean_routes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Every suggested path crossed itself for this location. "
+                "Try slightly different start or end pins, or a different target distance."
+            ),
+        )
+
     best_route = min(
-        converted_routes,
+        clean_routes,
         key=lambda route: abs(route["distance_km"] - target_km) + (_route_backtrack_penalty(route["map_data"]) * 0.08),
     )
-    best_gap = abs(best_route["distance_km"] - target_km)
-    backtrack_penalty = _route_backtrack_penalty(best_route["map_data"])
 
-    if best_gap <= strict_tolerance_km and backtrack_penalty <= 8:
+    if best_route["distance_km"] >= target_km - strict_tolerance_km:
         return best_route
 
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail=(
-            f"Could not find a clean route between the selected points within ±{round(strict_tolerance_km, 2)} km "
-            f"of {round(target_km, 2)} km. Best graph route was {best_route['distance_km']} km."
-        ),
+        detail="GRAPHOPPER_ROUTE_TOO_SHORT",
     )
 
 
@@ -625,11 +975,8 @@ async def _request_graphhopper_route(
         for seed in seeds:
             request_params: dict[str, object] = {
                 "point": start_pt,
-                "profile": gh_profile,
+                **_graphhopper_common_route_params(gh_profile),
                 "algorithm": "round_trip",
-                "points_encoded": "true",
-                "key": GRAPHHOPPER_API_KEY,
-                "elevation": "false",
                 "round_trip.distance": int(target_km * 1000),
                 "round_trip.seed": seed,
             }
@@ -646,21 +993,14 @@ async def _request_graphhopper_route(
                 continue
 
             path = paths[0]
-            encoded_polyline = path.get("points")
-            if not encoded_polyline:
+            candidate = _route_dict_from_graphhopper_path(path)
+            if candidate is None:
                 continue
 
-            decoded_coords = _decode_polyline(encoded_polyline)
-            elevation_gain_m = path.get("ascend")
-            if elevation_gain_m is not None:
-                elevation_gain_m = round(float(elevation_gain_m), 1)
+            decoded_coords = candidate["map_data"]
+            if _polyline_self_intersects(decoded_coords):
+                continue
 
-            candidate = {
-                "map_data": decoded_coords,
-                "distance_km": round(path["distance"] / 1000, 2),
-                "duration_seconds": int(path["time"] / 1000),
-                "elevation_gain_m": elevation_gain_m,
-            }
             gap = abs(candidate["distance_km"] - target_km)
             if gap < best_gap:
                 best_gap = gap
@@ -751,7 +1091,10 @@ async def _snap_waypoints_via_overpass(
         return points
 
 
-async def _snap_waypoints_to_routable_roads(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+async def _snap_waypoints_to_routable_roads(
+    points: list[tuple[float, float]],
+    terrain_pref: object | None = None,
+) -> list[tuple[float, float]]:
     """
     Snap candidate waypoints in two stages:
     1) Overpass snap to neighborhood/local roads (street-level preference)
@@ -763,7 +1106,7 @@ async def _snap_waypoints_to_routable_roads(points: list[tuple[float, float]]) -
     overpass_snapped = await _snap_waypoints_via_overpass(points)
     result: list[tuple[float, float]] = []
     for lat, lng in overpass_snapped:
-        nearest = await _request_osrm_nearest(lat, lng)
+        nearest = await _request_osrm_nearest(lat, lng, terrain_pref)
         if nearest is not None:
             result.append(nearest)
         else:
@@ -777,6 +1120,7 @@ async def _request_osrm_round_trip_route(payload: RouteCreate) -> dict:
     start_pt = _format_point(start_lat, start_lng)
     target_km = float(payload.distance_km)
     tolerance_km = max(0.6, target_km * 0.18)
+    terrain_pref = getattr(payload, "terrain", None)
 
     orientation_vectors = [
         (1.0, 0.0, 0.0, 1.0),
@@ -786,8 +1130,6 @@ async def _request_osrm_round_trip_route(payload: RouteCreate) -> dict:
     ]
     scales = (0.18, 0.24, 0.32, 0.42, 0.55, 0.72, 0.92)
 
-    # Pre-generate all intermediate waypoints so they can be batch-snapped
-    # to local roads in a single Overpass query before any routing calls.
     all_raw_candidates: list[list[str]] = []
     all_mid_points: list[tuple[float, float]] = []
     for scale in scales:
@@ -798,23 +1140,32 @@ async def _request_osrm_round_trip_route(payload: RouteCreate) -> dict:
             all_raw_candidates.append([start_pt, _format_point(*p1), _format_point(*p2), start_pt])
             all_mid_points.extend([p1, p2])
 
-    # One Overpass call snaps all waypoints to the nearest local road
-    snapped_mids = await _snap_waypoints_to_routable_roads(all_mid_points)
-    snap_it = iter(snapped_mids)
+    # Snap midpoints with drift rejection (avoids OSRM legs that chord across blocks).
+    snapped_mids = await _snap_detour_midpoints_for_osrm(all_mid_points, terrain_pref)
 
     candidates_snapped: list[list[str]] = []
+    mid_idx = 0
     for _ in all_raw_candidates:
-        s1 = next(snap_it)
-        s2 = next(snap_it)
+        s1 = snapped_mids[mid_idx]
+        s2 = snapped_mids[mid_idx + 1]
+        mid_idx += 2
+        if s1 is None or s2 is None:
+            continue
         candidates_snapped.append([start_pt, _format_point(*s1), _format_point(*s2), start_pt])
+
+    if not candidates_snapped:
+        candidates_snapped = [list(c) for c in all_raw_candidates]
 
     best_route: Optional[dict] = None
     best_gap = float("inf")
 
     for candidate_points in candidates_snapped:
         try:
-            candidate = await _request_osrm_route_for_points(candidate_points)
+            candidate = await _request_osrm_route_for_points(candidate_points, terrain_pref)
         except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
+            continue
+
+        if _polyline_self_intersects(candidate["map_data"]):
             continue
 
         gap = abs(candidate["distance_km"] - target_km)
@@ -893,6 +1244,9 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
         raise HTTPException(status_code=401, detail="User not authenticated")
 
     start_lat, start_lng, end_lat, end_lng = _normalize_route_coordinates(payload)
+    terrain_pref = getattr(payload, "terrain", None)
+    start_lat, start_lng = await _snap_to_nearest_walkable_node(start_lat, start_lng, terrain_pref)
+    end_lat, end_lng = await _snap_to_nearest_walkable_node(end_lat, end_lng, terrain_pref)
     normalized_payload = payload.model_copy(
         update={
             "start_lat": start_lat,
@@ -904,8 +1258,7 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
     start_pt = f"{start_lat},{start_lng}"
     end_pt = f"{end_lat},{end_lng}"
 
-    terrain_pref = getattr(payload, 'terrain', None)
-    elevation_pref = getattr(payload, 'elevation_profile', None)
+    elevation_pref = getattr(payload, "elevation_profile", None)
     gh_profile = "foot"
 
     if terrain_pref == "unpaved" or terrain_pref == TerrainEnum.unpaved:
@@ -916,7 +1269,31 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
     if GRAPHHOPPER_API_KEY:
         fallback_error_detail: Optional[str] = None
         try:
-            return await _request_graphhopper_route(normalized_payload, gh_profile, start_pt, end_pt)
+            gh_result = await _request_graphhopper_route(normalized_payload, gh_profile, start_pt, end_pt)
+            finalized = await _finalize_route_geometry(gh_result)
+            if _polyline_self_intersects(finalized["map_data"]):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="GRAPHOPPER_SELF_INTERSECT",
+                )
+            return finalized
+        except HTTPException as exc:
+            if str(exc.detail) == "GRAPHOPPER_ROUTE_TOO_SHORT":
+                try:
+                    if start_pt != end_pt:
+                        osrm_result = await _request_osrm_distance_constrained_route(normalized_payload)
+                    else:
+                        osrm_result = await _request_osrm_round_trip_route(normalized_payload)
+                    return await _finalize_route_geometry(osrm_result)
+                except HTTPException as osrm_exc:
+                    raise HTTPException(
+                        status_code=osrm_exc.status_code,
+                        detail=(
+                            f"Could not build a route close to your requested "
+                            f"{float(payload.distance_km):.1f} km. {osrm_exc.detail}"
+                        ),
+                    ) from osrm_exc
+            fallback_error_detail = str(exc.detail)
         except httpx.RequestError as exc:
             fallback_error_detail = f"Error connecting to GraphHopper API: {str(exc)}"
             if start_pt == end_pt:
@@ -931,15 +1308,15 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
                     detail="Round-trip route generation requires a valid GraphHopper API key.",
                 ) from exc
             fallback_error_detail = _extract_graphhopper_error_detail(exc)
-        except HTTPException as exc:
-            fallback_error_detail = str(exc.detail)
 
         # GraphHopper can fail in dense/local-road areas; fallback to OSRM keeps
         # route generation available for street-level routing.
         try:
             if start_pt != end_pt:
-                return await _request_osrm_distance_constrained_route(normalized_payload)
-            return await _request_osrm_round_trip_route(normalized_payload)
+                osrm_result = await _request_osrm_distance_constrained_route(normalized_payload)
+            else:
+                osrm_result = await _request_osrm_round_trip_route(normalized_payload)
+            return await _finalize_route_geometry(osrm_result)
         except HTTPException as osrm_exc:
             if fallback_error_detail:
                 raise HTTPException(
@@ -949,9 +1326,11 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
             raise
 
     if start_pt != end_pt:
-        return await _request_osrm_distance_constrained_route(normalized_payload)
+        osrm_only = await _request_osrm_distance_constrained_route(normalized_payload)
+        return await _finalize_route_geometry(osrm_only)
 
-    return await _request_osrm_round_trip_route(normalized_payload)
+    rt_only = await _request_osrm_round_trip_route(normalized_payload)
+    return await _finalize_route_geometry(rt_only)
 
 
 def save_route(db: Session, creator: User, payload: RouteSave) -> Route:
@@ -990,9 +1369,10 @@ def delete_route(db: Session, requester: User, route: Route) -> None:
     if route.creator_id != requester.uid:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator can delete route")
 
-    event = db.query(Event).filter(Event.route_id == route.id, Event.is_deleted.is_(False)).first()
-    if event:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Route is attached to an event")
+    # Events reference routes with ON DELETE RESTRICT. Removing the route requires
+    # deleting those event rows first (cascades invitations / attendee links).
+    # Saved-route deletion should succeed even if the route was used for a club run.
+    db.query(Event).filter(Event.route_id == route.id).delete(synchronize_session=False)
 
     try:
         # Decouple shared posts from this saved route before deletion so feed
