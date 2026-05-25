@@ -55,6 +55,13 @@ def _compute_effective_status(
     return is_active, subscription.status or "inactive", period_end
 
 
+class CheckoutSessionIn(BaseModel):
+    """Optional — mobile app sends URLs from Linking.createURL so Stripe redirect matches openAuthSessionAsync."""
+
+    success_url: str | None = None
+    cancel_url: str | None = None
+
+
 class CheckoutSessionOut(BaseModel):
     checkout_url: str
     session_id: str
@@ -72,6 +79,7 @@ class SubscriptionStatusOut(BaseModel):
 
 @router.post("/checkout-session", response_model=CheckoutSessionOut)
 def create_checkout_session(
+    payload: CheckoutSessionIn = CheckoutSessionIn(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -82,8 +90,10 @@ def create_checkout_session(
     subscription = _get_or_create_subscription_row(db, current_user)
 
     app_scheme = os.getenv("APP_SCHEME", "stride")
-    success_url = f"{app_scheme}://screens/subscription?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{app_scheme}://screens/subscription?checkout=cancel"
+    default_success = f"{app_scheme}://screens/subscription?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
+    default_cancel = f"{app_scheme}://screens/subscription?checkout=cancel"
+    success_url = (payload.success_url or "").strip() or default_success
+    cancel_url = (payload.cancel_url or "").strip() or default_cancel
 
     customer_id = subscription.stripe_customer_id
     if not customer_id:
