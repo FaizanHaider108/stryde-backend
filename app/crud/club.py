@@ -244,7 +244,7 @@ def delete_club(db: Session, owner: User, club: Club) -> None:
 
 
 def get_or_create_community(db: Session) -> Club:
-    """Get or create the STRIDE community club.
+    """Get or create the Stryde community club.
     
     The community is a special club owned by the system and visible to all users.
     """
@@ -256,7 +256,7 @@ def get_or_create_community(db: Session) -> Club:
     # Create new community
     community = Club(
         name="Our community",
-        description="The STRIDE community for all runners",
+        description="The Stryde community for all runners",
         image_url=None,
         is_community=True
     )

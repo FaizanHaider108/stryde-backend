@@ -52,7 +52,7 @@ def _build_reset_link(raw_token: str) -> str:
     reset_url_base = (
         os.getenv("RESET_PASSWORD_URL")
         or os.getenv("RESET_PASSWORD_DEEP_LINK")
-        or "stride://screens/setPassword"
+        or "stryde://screens/setPassword"
     ).strip().strip("'\"")
 
     if "{token}" in reset_url_base:
@@ -235,7 +235,7 @@ def request_password_reset(payload: PasswordResetRequest, db: Session = Depends(
     user = get_user_by_email(db, payload.email)
     if user:
         raw_token, _reset_token = create_password_reset_token(db, user)
-        reset_link = _build_reset_link(raw_token)  # stride://... deep link
+        reset_link = _build_reset_link(raw_token)  # stryde://... deep link
         email_click_link = _build_reset_email_link(raw_token)
         bridge_link = _build_reset_bridge_link(raw_token)
         subject = os.getenv("PASSWORD_RESET_SUBJECT", "Reset your Stryde password")

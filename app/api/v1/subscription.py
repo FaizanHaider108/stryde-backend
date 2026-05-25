@@ -89,7 +89,7 @@ def create_checkout_session(
         raise HTTPException(status_code=503, detail="Stripe dependency is not installed on server") from exc
     subscription = _get_or_create_subscription_row(db, current_user)
 
-    app_scheme = os.getenv("APP_SCHEME", "stride")
+    app_scheme = os.getenv("APP_SCHEME", "stryde")
     default_success = f"{app_scheme}://screens/subscription?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
     default_cancel = f"{app_scheme}://screens/subscription?checkout=cancel"
     success_url = (payload.success_url or "").strip() or default_success
@@ -114,7 +114,7 @@ def create_checkout_session(
             {
                 "price_data": {
                     "currency": "usd",
-                    "product_data": {"name": "Stride Premium"},
+                    "product_data": {"name": "Stryde Premium"},
                     "unit_amount": 1900,
                     "recurring": {"interval": "month"},
                 },

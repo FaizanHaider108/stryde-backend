@@ -29,7 +29,7 @@ def list_clubs(db: Session = Depends(get_db), current_user: User = Depends(get_c
 
 @router.get("/community", response_model=ClubOut)
 def get_community(db: Session = Depends(get_db)):
-    """Get the STRIDE system community."""
+    """Get the Stryde system community."""
     community = club_crud.get_or_create_community(db)
     return community
 

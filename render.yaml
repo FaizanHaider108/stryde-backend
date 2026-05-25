@@ -27,7 +27,7 @@ services:
       - key: CORS_ALLOWED_ORIGINS
         value: "*"
       - key: RESET_PASSWORD_URL
-        value: stride://screens/setPassword
+        value: stryde://screens/setPassword
       - key: PASSWORD_RESET_SUBJECT
         value: Reset your Stryde password
       - key: APPLE_CLIENT_ID
@@ -65,4 +65,4 @@ services:
       - key: STRIPE_PRICE_ID
         sync: false
       - key: APP_SCHEME
-        value: stride
+        value: stryde

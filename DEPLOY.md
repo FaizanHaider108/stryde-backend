@@ -1,7 +1,8 @@
 # Deploy Stryde backend
 
-Set the same variables as in `backend/.env.example` on your host (Render, Railway, Fly.io, VPS).  
-**Do not commit `.env`** — it contains secrets.
+Copy the variables from `.env.example` into your host (Render, Railway, Fly.io, or a VPS).
+
+Do not commit `.env` — it contains secrets.
 
 ## Required for a working API
 
@@ -19,7 +20,7 @@ Set the same variables as in `backend/.env.example` on your host (Render, Railwa
 |----------|---------|
 | `REFRESH_TOKEN_EXPIRE_DAYS` | Default `45` |
 | `RESET_TOKEN_EXPIRE_MINUTES` | Default `60` |
-| `RESET_PASSWORD_URL` | App deep link, e.g. `stride://screens/setPassword` |
+| `RESET_PASSWORD_URL` | App deep link, e.g. `stryde://screens/setPassword` |
 | `PASSWORD_RESET_SUBJECT` | Email subject line |
 | `APPLE_CLIENT_ID` | iOS bundle id; production: `com.strydelabs.app` only |
 
@@ -71,7 +72,7 @@ On Render: upload JSON as a **secret file** or paste into env and adjust code �
 |----------|---------|
 | `STRIPE_SECRET_KEY` | Stripe secret key |
 | `STRIPE_PRICE_ID` | Subscription price id |
-| `APP_SCHEME` | Deep link scheme, e.g. `stride` |
+| `APP_SCHEME` | Deep link scheme, e.g. `stryde` |
 
 ## Server / CORS
 
