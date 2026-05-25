@@ -2,7 +2,7 @@ from enum import Enum
 import uuid
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from .profile import PersonalInfoCreate
+from .profile import PersonalInfoCreate, PersonalInfoOut
 
 class RunnerType(str, Enum):
     grinder = "grinder"
@@ -42,6 +42,12 @@ class Token(BaseModel):
     access_token: str
     refresh_token: Optional[str] = None
     token_type: str = "bearer"
+
+
+class SocialLoginResponse(Token):
+    """Tokens plus profile so the app can sign in with one round trip."""
+
+    profile: PersonalInfoOut
 
 
 class SocialLoginRequest(BaseModel):

@@ -15,6 +15,7 @@ from ...crud.auth import (
     get_valid_password_reset_token,
     reset_password_with_token,
 )
+from ...crud.profile import build_profile_response
 from ...lib.db import get_db
 from ...lib.mailer import send_email
 from ...lib.firebase_admin_client import verify_firebase_id_token
@@ -32,6 +33,7 @@ from ...schemas.auth import (
     PasswordResetRequest,
     RefreshTokenRequest,
     SocialLoginRequest,
+    SocialLoginResponse,
     Token,
     UserCreate,
     UserOut,
@@ -147,7 +149,7 @@ def logout():
     return {"message": "Logged out successfully"}
 
 
-@router.post("/social-login", response_model=Token)
+@router.post("/social-login", response_model=SocialLoginResponse)
 async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db)):
     if request.provider.value == "google":
         try:
@@ -168,6 +170,7 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
         except HTTPException:
             raise
         except Exception as exc:
+            logger.exception("Google social login: Firebase token verification failed")
             raise HTTPException(status_code=400, detail="Invalid Firebase token") from exc
 
         user = login_social_user(
@@ -188,7 +191,11 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
         }
         access_token = create_access_token(token_payload)
         refresh_token = create_refresh_token({"email": user.email})
-        return {"access_token": access_token, "refresh_token": refresh_token}
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "profile": build_profile_response(user),
+        }
 
     if request.provider.value == "apple":
         try:
@@ -219,7 +226,11 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
             }
             access_token = create_access_token(token_payload)
             refresh_token = create_refresh_token({"email": user.email})
-            return {"access_token": access_token, "refresh_token": refresh_token}
+            return {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "profile": build_profile_response(user),
+            }
         except AppleTokenError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except HTTPException:
