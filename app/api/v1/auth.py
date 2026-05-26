@@ -26,7 +26,9 @@ from ...lib.google_oauth import (
     create_google_oauth_state,
     decode_google_oauth_state,
     exchange_google_code,
+    google_callback_uri,
     google_oauth_configured,
+    google_oauth_setup,
     verify_google_id_token,
 )
 from ...lib.security import (
@@ -284,6 +286,36 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
     raise HTTPException(status_code=400, detail="Unsupported provider")
 
 
+@router.get("/google/setup")
+def google_oauth_setup_info():
+    """
+    Returns the exact redirect_uri to register in Google Cloud Console (Web OAuth client).
+    Open in a browser or curl after deploy to verify Render env matches Google Console.
+    """
+    info = google_oauth_setup()
+    if not info["configured"]:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Google OAuth env vars missing on this server.",
+                "required": [
+                    "GOOGLE_OAUTH_CLIENT_ID",
+                    "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "BACKEND_PUBLIC_URL=https://your-service.onrender.com (or GOOGLE_OAUTH_PUBLIC_URL)",
+                ],
+                **info,
+            },
+        )
+    return {
+        **info,
+        "instructions": (
+            "Google Cloud Console → APIs & Services → Credentials → "
+            "OAuth 2.0 Client IDs → Web client (same client_id above) → "
+            "Authorized redirect URIs → paste redirect_uri exactly (no trailing slash)."
+        ),
+    }
+
+
 @router.get("/google/start")
 def google_oauth_start(
     app_return: str,
@@ -306,6 +338,8 @@ def google_oauth_start(
         raise HTTPException(status_code=400, detail="app_return is required")
 
     try:
+        callback = google_callback_uri()
+        logger.info("Google OAuth start — redirect_uri=%s", callback)
         state = create_google_oauth_state(after_path=after_path, app_return=app_return)
         return RedirectResponse(build_google_authorization_url(state), status_code=302)
     except Exception as exc:

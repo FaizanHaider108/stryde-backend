@@ -58,6 +58,16 @@ def google_oauth_configured() -> bool:
     return bool(_google_client_id() and _google_client_secret() and public)
 
 
+def google_oauth_setup() -> dict[str, str | bool]:
+    """Public setup info — copy redirect_uri into Google Cloud Console exactly."""
+    return {
+        "configured": google_oauth_configured(),
+        "client_id": _google_client_id(),
+        "redirect_uri": google_callback_uri(),
+        "public_base_url": _google_oauth_public_url(),
+    }
+
+
 def google_callback_uri() -> str:
     public = _google_oauth_public_url()
     if not public:
