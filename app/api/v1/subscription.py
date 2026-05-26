@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime, timezone
 import importlib
@@ -12,6 +13,7 @@ from ...models.subscription import UserSubscription
 from ...models.user import User
 
 router = APIRouter(prefix="/api/v1/subscription", tags=["subscription"])
+logger = logging.getLogger(__name__)
 
 
 def _stripe_get(obj, key: str, default=None):
@@ -142,6 +144,15 @@ def create_checkout_session(
     )
 
 
+def _stripe_subscription_id(session) -> str | None:
+    raw = _stripe_get(session, "subscription")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        return raw
+    return _stripe_get(raw, "id")
+
+
 @router.post("/confirm", response_model=SubscriptionStatusOut)
 def confirm_subscription(
     payload: ConfirmSubscriptionIn,
@@ -154,7 +165,10 @@ def confirm_subscription(
         raise HTTPException(status_code=503, detail="Stripe dependency is not installed on server") from exc
     subscription = _get_or_create_subscription_row(db, current_user)
 
-    session = stripe.checkout.Session.retrieve(payload.session_id)
+    session = stripe.checkout.Session.retrieve(
+        payload.session_id,
+        expand=["subscription"],
+    )
     if not session:
         raise HTTPException(status_code=400, detail="Invalid checkout session")
 
@@ -163,29 +177,52 @@ def confirm_subscription(
     if user_id_from_session and str(user_id_from_session) != str(current_user.uid):
         raise HTTPException(status_code=403, detail="This checkout session does not belong to you")
 
-    subscription_id = _stripe_get(session, "subscription")
+    subscription_id = _stripe_subscription_id(session)
     payment_status = _stripe_get(session, "payment_status")
     checkout_status = _stripe_get(session, "status")
 
-    is_active = checkout_status == "complete" and payment_status in {"paid", "no_payment_required"}
-    status_value = "active" if is_active else "incomplete"
+    session_paid = checkout_status == "complete" and payment_status in {"paid", "no_payment_required"}
+    is_active = session_paid
+    status_value = "active" if session_paid else (checkout_status or "incomplete")
     current_period_end = None
 
     if subscription_id:
-        stripe_sub = stripe.Subscription.retrieve(subscription_id)
-        subscription_id = stripe_sub.id
-        status_value = stripe_sub.status or status_value
+        stripe_sub = _stripe_get(session, "subscription")
+        if stripe_sub is None or isinstance(stripe_sub, str):
+            stripe_sub = stripe.Subscription.retrieve(subscription_id)
+        subscription_id = _stripe_get(stripe_sub, "id") or subscription_id
+        sub_status = _stripe_get(stripe_sub, "status")
+        if sub_status:
+            status_value = sub_status
         current_period_end_ts = _stripe_get(stripe_sub, "current_period_end")
         if current_period_end_ts:
             current_period_end = datetime.fromtimestamp(current_period_end_ts, tz=timezone.utc)
-        is_active = status_value in {"active", "trialing"}
+        if sub_status in {"active", "trialing"}:
+            is_active = True
+        elif session_paid:
+            # Checkout finished — treat as active even if Stripe sub status lags briefly.
+            is_active = True
+            if status_value in {None, "", "incomplete", "open"}:
+                status_value = "active"
 
     subscription.stripe_checkout_session_id = payload.session_id
     subscription.stripe_subscription_id = subscription_id
-    subscription.status = status_value
+    subscription.status = status_value or "inactive"
     subscription.is_active = is_active
     subscription.current_period_end = current_period_end
     db.commit()
+
+    logger.info(
+        "subscription confirm session_id=%s checkout_status=%s payment_status=%s "
+        "stripe_sub_id=%s status_value=%s is_active=%s user=%s",
+        payload.session_id,
+        checkout_status,
+        payment_status,
+        subscription_id,
+        status_value,
+        is_active,
+        current_user.email,
+    )
 
     return SubscriptionStatusOut(
         is_active=subscription.is_active,
