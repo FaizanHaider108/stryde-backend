@@ -25,12 +25,20 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 
 
+def _env_secret(name: str, *fallback_names: str) -> str:
+    raw = os.getenv(name) or ""
+    for alt in fallback_names:
+        if not raw:
+            raw = os.getenv(alt) or ""
+    return raw.strip().strip('"').strip("'")
+
+
 def _google_client_id() -> str:
-    return (os.getenv("GOOGLE_OAUTH_CLIENT_ID") or os.getenv("GOOGLE_WEB_CLIENT_ID") or "").strip()
+    return _env_secret("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_WEB_CLIENT_ID")
 
 
 def _google_client_secret() -> str:
-    return (os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET") or "").strip()
+    return _env_secret("GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET")
 
 
 def _google_oauth_public_url() -> str:
@@ -60,9 +68,12 @@ def google_oauth_configured() -> bool:
 
 def google_oauth_setup() -> dict[str, str | bool]:
     """Public setup info — copy redirect_uri into Google Cloud Console exactly."""
+    secret = _google_client_secret()
     return {
         "configured": google_oauth_configured(),
         "client_id": _google_client_id(),
+        "client_secret_set": bool(secret),
+        "client_secret_length": len(secret),
         "redirect_uri": google_callback_uri(),
         "public_base_url": _google_oauth_public_url(),
     }
