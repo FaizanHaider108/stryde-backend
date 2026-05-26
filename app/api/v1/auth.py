@@ -2,7 +2,7 @@ import logging
 import os
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, quote
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from ...crud.auth import (
@@ -20,6 +20,15 @@ from ...lib.db import get_db
 from ...lib.mailer import send_email
 from ...lib.firebase_admin_client import verify_firebase_id_token
 from ...lib.apple_id_token import AppleTokenError, verify_apple_identity_token
+from ...lib.google_oauth import (
+    append_query_params,
+    build_google_authorization_url,
+    create_google_oauth_state,
+    decode_google_oauth_state,
+    exchange_google_code,
+    google_oauth_configured,
+    verify_google_id_token,
+)
 from ...lib.security import (
     RESET_TOKEN_EXPIRE_MINUTES,
     create_access_token,
@@ -102,14 +111,13 @@ def signup(user_in: UserCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(
             status_code=400,
-            detail="Email already sexists please try another one",
+            detail="email already registered",
         )
     user = create_user(db, user_in)
     if not user:
-        # Handles race condition where another request inserted same email
         raise HTTPException(
             status_code=400,
-            detail="Email already sexists please try another one",
+            detail="email already registered",
         )
     return user
 
@@ -164,14 +172,28 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
                 (firebase_payload.get("firebase") or {}).get("sign_in_provider")
             )
             if not email:
-                raise HTTPException(status_code=400, detail="Invalid Firebase token")
+                logger.warning("Google social-login: Firebase token missing email")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Google did not provide an email address. Check your Google account settings.",
+                )
             if firebase_sign_in_provider not in {"google.com", "custom"}:
-                raise HTTPException(status_code=400, detail="Unsupported Firebase sign-in provider")
+                logger.warning(
+                    "Google social-login: unsupported provider %s",
+                    firebase_sign_in_provider,
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported Google sign-in provider: {firebase_sign_in_provider}",
+                )
         except HTTPException:
             raise
         except Exception as exc:
-            logger.exception("Google social login: Firebase token verification failed")
-            raise HTTPException(status_code=400, detail="Invalid Firebase token") from exc
+            logger.exception("Google social-login: Firebase token verification failed")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Google token. Sign out and try again.",
+            ) from exc
 
         user = login_social_user(
             db=db,
@@ -182,7 +204,11 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
         )
 
         if not user:
-            raise HTTPException(status_code=400, detail="Could not create social account")
+            logger.error("Google social-login: could not find or create user for %s", email)
+            raise HTTPException(
+                status_code=400,
+                detail="Could not sign in with Google. Please try again.",
+            )
 
         token_payload = {
             "full_name": user.full_name,
@@ -215,9 +241,24 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
                 runner_type=request.runner_type,
             )
             if not user:
+                if email_from_apple:
+                    existing = get_user_by_email(db, email_from_apple)
+                    if existing and existing.apple_sub and existing.apple_sub != apple_sub:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "This email is linked to another Apple sign-in from a different app build. "
+                                "Try signing in with your email and password, or contact support to merge accounts."
+                            ),
+                        )
+                logger.error(
+                    "Apple social-login failed for sub=%s email=%s",
+                    apple_sub,
+                    email_from_apple,
+                )
                 raise HTTPException(
                     status_code=400,
-                    detail="Could not create or link Apple account (email may already be in use).",
+                    detail="Could not sign in with Apple. Please try again.",
                 )
             token_payload = {
                 "full_name": user.full_name,
@@ -232,13 +273,117 @@ async def social_login(request: SocialLoginRequest, db: Session = Depends(get_db
                 "profile": build_profile_response(user),
             }
         except AppleTokenError as exc:
+            logger.warning("Apple social-login token error: %s", exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except HTTPException:
             raise
         except Exception as exc:
+            logger.exception("Apple social-login failed")
             raise HTTPException(status_code=400, detail="Invalid Apple token") from exc
 
     raise HTTPException(status_code=400, detail="Unsupported provider")
+
+
+@router.get("/google/start")
+def google_oauth_start(
+    app_return: str,
+    after_path: str = "/(tabs)/home",
+):
+    """
+    Expo Go / LAN dev: browser opens here, Google redirects to our backend callback,
+    then we deep-link back to the app with JWT tokens (skips broken auth.expo.io).
+    """
+    if not google_oauth_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google OAuth is not configured on the server. "
+                "Set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and "
+                "GOOGLE_OAUTH_PUBLIC_URL (https ngrok/Render URL — Google rejects 192.168.x.x)."
+            ),
+        )
+    if not app_return.strip():
+        raise HTTPException(status_code=400, detail="app_return is required")
+
+    try:
+        state = create_google_oauth_state(after_path=after_path, app_return=app_return)
+        return RedirectResponse(build_google_authorization_url(state), status_code=302)
+    except Exception as exc:
+        logger.exception("Google OAuth start failed")
+        raise HTTPException(status_code=500, detail="Could not start Google sign-in") from exc
+
+
+@router.get("/google/callback")
+def google_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Exchange Google code, create/find user, redirect to app with Stryde JWT tokens."""
+    app_return = "stryde://oauth/google"
+    after_path = "/(tabs)/home"
+
+    try:
+        if not state:
+            raise ValueError("Missing OAuth state")
+        decoded = decode_google_oauth_state(state)
+        app_return = str(decoded.get("return") or app_return)
+        after_path = str(decoded.get("after") or after_path)
+        code_verifier = str(decoded["cv"])
+
+        if error:
+            raise ValueError(error)
+        if not code:
+            raise ValueError("Google did not return an authorization code")
+
+        token_payload = exchange_google_code(code, code_verifier)
+        id_token = token_payload.get("id_token")
+        if not id_token:
+            raise ValueError("Google did not return an identity token")
+
+        claims = verify_google_id_token(str(id_token))
+        email = str(claims["email"])
+        full_name = str(claims.get("name") or "Google User")
+
+        user = login_social_user(
+            db=db,
+            email=email,
+            full_name=full_name,
+            runner_type="social stryder",
+            provider="google",
+        )
+        if not user:
+            raise ValueError("Could not sign in with Google")
+
+        access_token = create_access_token(
+            {
+                "full_name": user.full_name,
+                "email": user.email,
+                "runner_type": user.runner_type.value,
+            }
+        )
+        refresh_token = create_refresh_token({"email": user.email})
+
+        logger.info("Google OAuth callback OK for %s — redirecting to app", email)
+
+        redirect_url = append_query_params(
+            app_return,
+            {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "after_path": after_path,
+            },
+        )
+        return RedirectResponse(redirect_url, status_code=302)
+    except Exception as exc:
+        logger.exception("Google OAuth callback failed")
+        message = str(exc) if str(exc) else "Google sign-in failed"
+        redirect_url = append_query_params(
+            app_return,
+            {"oauth_error": message[:200]},
+        )
+        return RedirectResponse(redirect_url, status_code=302)
 
 
 @router.post("/password-reset/request", response_model=MessageResponse)

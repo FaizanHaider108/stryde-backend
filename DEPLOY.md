@@ -24,7 +24,33 @@ Do not commit `.env` — it contains secrets.
 | `PASSWORD_RESET_SUBJECT` | Email subject line |
 | `APPLE_CLIENT_ID` | iOS bundle id; production: `com.strydelabs.app` only |
 
-Optional: `RESET_PASSWORD_DEEP_LINK`, `RESET_PASSWORD_EMAIL_URL`
+## Google OAuth (Expo Go backend broker)
+
+| Variable | Purpose |
+|----------|---------|
+| `GOOGLE_OAUTH_CLIENT_ID` | Web OAuth client ID from Google Cloud |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Web OAuth client secret |
+| `GOOGLE_OAUTH_PUBLIC_URL` | Optional on Render if `BACKEND_PUBLIC_URL` is already `https://…` |
+
+**Google Cloud Console** → Web client → Authorized redirect URI (exact):
+
+```
+https://stryde-backend-ts25.onrender.com/api/v1/auth/google/callback
+```
+
+**Mobile app** (`app/.env`) for Expo Go while API stays on LAN:
+
+```env
+EXPO_PUBLIC_API_BASE_URL=http://YOUR_LAN_IP:8000
+EXPO_PUBLIC_OAUTH_API_BASE_URL=https://stryde-backend-ts25.onrender.com
+```
+
+Verify after deploy:
+
+```bash
+curl -I "https://stryde-backend-ts25.onrender.com/api/v1/auth/google/start?app_return=test&after_path=/home"
+# Expect: HTTP/1.1 302 (not 404)
+```
 
 ## Email (password reset)
 
@@ -64,7 +90,7 @@ If AWS vars are empty, uploads go to local `uploads/` (not ideal on Render — u
 |----------|---------|
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | Path to service account JSON inside the container, or mount as secret file |
 
-On Render: upload JSON as a **secret file** or paste into env and adjust code — default expects a file at `./stride-b2956-....json` in `backend/`.
+On Render: upload JSON as a **secret file** or paste into env and adjust code — default expects a file at `./stryde-firebase-adminsdk.json` in `backend/`.
 
 ## Stripe
 

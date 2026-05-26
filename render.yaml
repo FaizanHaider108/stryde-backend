@@ -59,10 +59,17 @@ services:
       - key: GLM_REQUEST_TIMEOUT
         value: "120"
       - key: FIREBASE_SERVICE_ACCOUNT_PATH
-        value: ./stride-b2956-315203c30932.json
+        value: ./stryde-firebase-adminsdk.json
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_PRICE_ID
         sync: false
       - key: APP_SCHEME
         value: stryde
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      # Optional on Render if BACKEND_PUBLIC_URL is https://your-service.onrender.com
+      - key: GOOGLE_OAUTH_PUBLIC_URL
+        sync: false

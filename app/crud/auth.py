@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import uuid
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,8 +19,18 @@ from ..schemas.auth import UserCreate
 from . import club as club_crud
 
 
+def _normalize_email(email: str | None) -> str | None:
+    if not email or not isinstance(email, str):
+        return None
+    normalized = email.strip().lower()
+    return normalized or None
+
+
 def get_user_by_email(db: Session, email: str):
-    return db.query(User).filter(User.email == email).first()
+    normalized = _normalize_email(email)
+    if not normalized:
+        return None
+    return db.query(User).filter(func.lower(User.email) == normalized).first()
 
 
 def get_user_by_apple_sub(db: Session, apple_sub: str):
@@ -27,10 +38,13 @@ def get_user_by_apple_sub(db: Session, apple_sub: str):
 
 
 def create_user(db: Session, user_in: UserCreate):
+    normalized_email = _normalize_email(user_in.email)
+    if not normalized_email:
+        return None
     hashed = get_password_hash(user_in.password)
     user = User(
         full_name=user_in.full_name,
-        email=user_in.email,
+        email=normalized_email,
         password_hash=hashed,
         runner_type=RunnerType(user_in.runner_type.value if hasattr(user_in.runner_type, 'value') else user_in.runner_type),
         auth_provider=AuthProvider.credentials,
@@ -69,7 +83,12 @@ def login_social_user(
     runner_type,
     provider: str,
 ):
-    user = get_user_by_email(db, email)
+    """Find existing user by email and sign in, or create a new social account."""
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        return None
+
+    user = get_user_by_email(db, normalized_email)
 
     if user:
         if full_name and user.full_name != full_name:
@@ -86,7 +105,7 @@ def login_social_user(
 
     user = User(
         full_name=full_name,
-        email=email,
+        email=normalized_email,
         password_hash=None,
         runner_type=RunnerType(runner_value),
         auth_provider=AuthProvider(provider),
@@ -100,7 +119,59 @@ def login_social_user(
         return user
     except IntegrityError:
         db.rollback()
+        existing = get_user_by_email(db, normalized_email)
+        if existing:
+            if full_name and existing.full_name != full_name:
+                existing.full_name = full_name
+            existing.auth_provider = AuthProvider(provider)
+            db.add(existing)
+            db.commit()
+            db.refresh(existing)
+            return existing
         return None
+
+
+def _link_apple_to_existing_user(
+    db: Session,
+    existing: User,
+    apple_sub: str,
+    full_name: str,
+    *,
+    apple_email_matches: bool = False,
+) -> User | None:
+    """
+    Sign in an existing account and attach this Apple ID.
+
+    Apple issues a different `sub` per app/bundle (Expo Go vs TestFlight). When Apple
+    returns an email that matches this account, treat it as the same person and re-link.
+    """
+    if existing.apple_sub and existing.apple_sub != apple_sub:
+        if not apple_email_matches:
+            return None
+        # Same verified email — update Apple sub (e.g. moved from Expo Go to dev build).
+        other = get_user_by_apple_sub(db, apple_sub)
+        if other and other.uid != existing.uid:
+            is_orphan_apple_row = (
+                other.password_hash is None
+                and other.auth_provider == AuthProvider.apple
+                and (other.email.endswith("@example.com") or other.email.startswith("apple."))
+            )
+            if is_orphan_apple_row:
+                db.delete(other)
+                db.flush()
+            else:
+                return None
+        existing.apple_sub = apple_sub
+    elif not existing.apple_sub:
+        existing.apple_sub = apple_sub
+
+    existing.auth_provider = AuthProvider.apple
+    if full_name and existing.full_name in ("Apple User", "") and full_name != "Apple User":
+        existing.full_name = full_name
+    db.add(existing)
+    db.commit()
+    db.refresh(existing)
+    return existing
 
 
 def _synthetic_apple_email(apple_sub: str) -> str:
@@ -117,14 +188,14 @@ def login_social_user_apple(
     runner_type,
 ):
     """
-    Find or create a user for Sign in with Apple.
+    Sign in with Apple: find by apple_sub or existing email, link when needed, or create once.
 
-    Subsequent Apple logins often omit `email` in the JWT; we always key off `sub`
-    stored in `apple_sub`.
+    This endpoint is used for both login and signup screens — an existing email always signs in;
+    duplicate-email errors are only for email/password /signup.
     """
     user = get_user_by_apple_sub(db, apple_sub)
     if user:
-        if full_name and user.full_name != full_name:
+        if full_name and user.full_name in ("Apple User", "") and full_name != "Apple User":
             user.full_name = full_name
         user.auth_provider = AuthProvider.apple
         db.add(user)
@@ -132,13 +203,24 @@ def login_social_user_apple(
         db.refresh(user)
         return user
 
-    resolved_email = (email_from_apple or "").strip() or None
+    resolved_email = _normalize_email(email_from_apple)
     if resolved_email:
         existing = get_user_by_email(db, resolved_email)
-        if existing and existing.apple_sub and existing.apple_sub != apple_sub:
-            return None
-        if existing and not existing.apple_sub:
-            return None
+        if existing:
+            try:
+                return _link_apple_to_existing_user(
+                    db,
+                    existing,
+                    apple_sub,
+                    full_name,
+                    apple_email_matches=True,
+                )
+            except IntegrityError:
+                db.rollback()
+                linked = get_user_by_apple_sub(db, apple_sub)
+                if linked:
+                    return linked
+                return None
 
     if not resolved_email:
         resolved_email = _synthetic_apple_email(apple_sub)
@@ -165,6 +247,17 @@ def login_social_user_apple(
         return user
     except IntegrityError:
         db.rollback()
+        linked = get_user_by_apple_sub(db, apple_sub)
+        if linked:
+            return linked
+        if resolved_email:
+            existing = get_user_by_email(db, resolved_email)
+            if existing:
+                try:
+                    return _link_apple_to_existing_user(db, existing, apple_sub, full_name)
+                except IntegrityError:
+                    db.rollback()
+                    return get_user_by_apple_sub(db, apple_sub)
         return None
 
 
