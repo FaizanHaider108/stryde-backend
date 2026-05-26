@@ -23,6 +23,8 @@ from ...lib.apple_id_token import AppleTokenError, verify_apple_identity_token
 from ...lib.google_oauth_exchange import (
     consume_google_oauth_exchange_code,
     create_google_oauth_exchange_code,
+    poll_google_oauth_exchange,
+    register_google_oauth_poll_error,
 )
 from ...lib.google_oauth import (
     append_query_params,
@@ -326,6 +328,7 @@ def google_oauth_setup_info():
 def google_oauth_start(
     app_return: str,
     after_path: str = "/(tabs)/home",
+    poll_id: str | None = None,
 ):
     """
     Expo Go / LAN dev: browser opens here, Google redirects to our backend callback,
@@ -346,7 +349,11 @@ def google_oauth_start(
     try:
         callback = google_callback_uri()
         logger.info("Google OAuth start — redirect_uri=%s", callback)
-        state = create_google_oauth_state(after_path=after_path, app_return=app_return)
+        state = create_google_oauth_state(
+            after_path=after_path,
+            app_return=app_return,
+            poll_id=poll_id,
+        )
         return RedirectResponse(build_google_authorization_url(state), status_code=302)
     except Exception as exc:
         logger.exception("Google OAuth start failed")
@@ -370,6 +377,7 @@ def google_oauth_callback(
         decoded = decode_google_oauth_state(state)
         app_return = str(decoded.get("return") or app_return)
         after_path = str(decoded.get("after") or after_path)
+        poll_id = str(decoded.get("poll") or "")
         code_verifier = str(decoded["cv"])
 
         if error:
@@ -407,7 +415,12 @@ def google_oauth_callback(
 
         logger.info("Google OAuth callback OK for %s — redirecting to app", email)
 
-        xcode = create_google_oauth_exchange_code(access_token, refresh_token, after_path)
+        xcode = create_google_oauth_exchange_code(
+            access_token,
+            refresh_token,
+            after_path,
+            poll_id=poll_id or None,
+        )
         redirect_url = append_query_params(
             app_return,
             {
@@ -419,6 +432,14 @@ def google_oauth_callback(
     except Exception as exc:
         logger.exception("Google OAuth callback failed")
         message = str(exc) if str(exc) else "Google sign-in failed"
+        try:
+            if state:
+                decoded = decode_google_oauth_state(state)
+                failed_poll = str(decoded.get("poll") or "")
+                if failed_poll:
+                    register_google_oauth_poll_error(failed_poll, message)
+        except Exception:
+            pass
         redirect_url = append_query_params(
             app_return,
             {"oauth_error": message[:200]},
@@ -438,6 +459,32 @@ def google_oauth_complete(payload: GoogleOAuthCompleteRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/google/poll")
+def google_oauth_poll(poll_id: str):
+    """
+    Expo Go fallback: app polls after the Google browser closes.
+    Returns tokens once backend callback finishes — no deep link required.
+    """
+    normalized = (poll_id or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="poll_id is required")
+
+    try:
+        data = poll_google_oauth_exchange(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not data:
+        return {"ready": False}
+
+    return {
+        "ready": True,
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "after_path": data["after_path"],
+    }
 
 
 @router.post("/password-reset/request", response_model=MessageResponse)

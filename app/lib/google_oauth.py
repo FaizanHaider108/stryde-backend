@@ -91,8 +91,8 @@ def _pkce_challenge(code_verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def create_google_oauth_state(after_path: str, app_return: str) -> str:
-    """Signed state JWT embeds PKCE verifier, return URL, and after_path."""
+def create_google_oauth_state(after_path: str, app_return: str, poll_id: str | None = None) -> str:
+    """Signed state JWT embeds PKCE verifier, return URL, after_path, and optional poll_id."""
     if not SECRET_KEY or not ALGORITHM:
         raise RuntimeError("JWT configuration missing")
 
@@ -103,6 +103,9 @@ def create_google_oauth_state(after_path: str, app_return: str) -> str:
         "return": app_return,
         "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
     }
+    normalized_poll = (poll_id or "").strip()
+    if normalized_poll:
+        payload["poll"] = normalized_poll
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
