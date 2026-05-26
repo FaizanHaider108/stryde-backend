@@ -20,6 +20,10 @@ from ...lib.db import get_db
 from ...lib.mailer import send_email
 from ...lib.firebase_admin_client import verify_firebase_id_token
 from ...lib.apple_id_token import AppleTokenError, verify_apple_identity_token
+from ...lib.google_oauth_exchange import (
+    consume_google_oauth_exchange_code,
+    create_google_oauth_exchange_code,
+)
 from ...lib.google_oauth import (
     append_query_params,
     build_google_authorization_url,
@@ -39,6 +43,8 @@ from ...lib.security import (
     hash_password_reset_token,
 )
 from ...schemas.auth import (
+    GoogleOAuthCompleteRequest,
+    GoogleOAuthCompleteResponse,
     MessageResponse,
     PasswordResetConfirm,
     PasswordResetRequest,
@@ -401,11 +407,11 @@ def google_oauth_callback(
 
         logger.info("Google OAuth callback OK for %s — redirecting to app", email)
 
+        xcode = create_google_oauth_exchange_code(access_token, refresh_token, after_path)
         redirect_url = append_query_params(
             app_return,
             {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
+                "xcode": xcode,
                 "after_path": after_path,
             },
         )
@@ -418,6 +424,20 @@ def google_oauth_callback(
             {"oauth_error": message[:200]},
         )
         return RedirectResponse(redirect_url, status_code=302)
+
+
+@router.post("/google/complete", response_model=GoogleOAuthCompleteResponse)
+def google_oauth_complete(payload: GoogleOAuthCompleteRequest):
+    """Exchange a short-lived code from the OAuth deep link for Stryde JWT tokens."""
+    try:
+        data = consume_google_oauth_exchange_code(payload.xcode)
+        return GoogleOAuthCompleteResponse(
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            after_path=data["after_path"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/password-reset/request", response_model=MessageResponse)

@@ -57,6 +57,14 @@ class SocialLoginRequest(BaseModel):
     name_from_frontend: Optional[str] = None
 
 
+class GoogleOAuthCompleteRequest(BaseModel):
+    xcode: str
+
+
+class GoogleOAuthCompleteResponse(Token):
+    after_path: str = "/(tabs)/home"
+
+
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
