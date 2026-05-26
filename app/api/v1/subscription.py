@@ -1,13 +1,16 @@
 import logging
 import os
+import urllib.parse
 from datetime import datetime, timezone
 import importlib
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ...lib.db import get_db
+from ...lib.google_oauth import append_query_params
 from ...lib.security import get_current_user
 from ...models.subscription import UserSubscription
 from ...models.user import User
@@ -57,9 +60,49 @@ def _compute_effective_status(
     return is_active, subscription.status or "inactive", period_end
 
 
-class CheckoutSessionIn(BaseModel):
-    """Optional — mobile app sends URLs from Linking.createURL so Stripe redirect matches openAuthSessionAsync."""
+def _resolve_backend_public_url() -> str:
+    url = (
+        os.getenv("BACKEND_PUBLIC_URL")
+        or os.getenv("GOOGLE_OAUTH_PUBLIC_URL")
+        or ""
+    ).strip().rstrip("/")
+    if not url.startswith("https://"):
+        raise HTTPException(
+            status_code=500,
+            detail="BACKEND_PUBLIC_URL must be set to your public https URL (required for Stripe checkout redirects)",
+        )
+    return url
 
+
+def _default_app_return() -> str:
+    app_scheme = os.getenv("APP_SCHEME", "stryde")
+    return f"{app_scheme}://screens/subscription"
+
+
+def _is_allowed_app_return(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url.strip())
+    return parsed.scheme in {"stryde", "exp"}
+
+
+def _build_stripe_redirect_urls(app_return: str) -> tuple[str, str]:
+    """Stripe only accepts https success/cancel URLs — bridge through the backend, then deep-link to the app."""
+    backend = _resolve_backend_public_url()
+    encoded_return = urllib.parse.quote(app_return, safe="")
+    success_url = (
+        f"{backend}/api/v1/subscription/checkout-return"
+        f"?checkout=success&session_id={{CHECKOUT_SESSION_ID}}&app_return={encoded_return}"
+    )
+    cancel_url = (
+        f"{backend}/api/v1/subscription/checkout-return"
+        f"?checkout=cancel&app_return={encoded_return}"
+    )
+    return success_url, cancel_url
+
+
+class CheckoutSessionIn(BaseModel):
+    """Mobile app sends app_return (deep link) so Stripe can redirect via this backend."""
+
+    app_return: str | None = None
     success_url: str | None = None
     cancel_url: str | None = None
 
@@ -91,11 +134,21 @@ def create_checkout_session(
         raise HTTPException(status_code=503, detail="Stripe dependency is not installed on server") from exc
     subscription = _get_or_create_subscription_row(db, current_user)
 
-    app_scheme = os.getenv("APP_SCHEME", "stryde")
-    default_success = f"{app_scheme}://screens/subscription?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
-    default_cancel = f"{app_scheme}://screens/subscription?checkout=cancel"
-    success_url = (payload.success_url or "").strip() or default_success
-    cancel_url = (payload.cancel_url or "").strip() or default_cancel
+    app_return = (payload.app_return or "").strip()
+    if not app_return:
+        legacy_success = (payload.success_url or "").strip()
+        if legacy_success.startswith(("stryde://", "exp://")):
+            app_return = legacy_success.split("?")[0]
+    if not app_return or not _is_allowed_app_return(app_return):
+        app_return = _default_app_return()
+
+    success_url, cancel_url = _build_stripe_redirect_urls(app_return)
+    logger.info(
+        "checkout-session user=%s app_return=%s success_url=%s",
+        current_user.email,
+        app_return,
+        success_url,
+    )
 
     customer_id = subscription.stripe_customer_id
     if not customer_id:
@@ -142,6 +195,26 @@ def create_checkout_session(
         checkout_url=checkout_session.url,
         session_id=checkout_session.id,
     )
+
+
+@router.get("/checkout-return")
+def checkout_return(
+    checkout: str = "cancel",
+    session_id: str | None = None,
+    app_return: str | None = None,
+):
+    """Stripe success/cancel landing page — redirects into the mobile app deep link."""
+    target = urllib.parse.unquote((app_return or "").strip())
+    if not target or not _is_allowed_app_return(target):
+        target = _default_app_return()
+
+    params: dict[str, str] = {"checkout": checkout}
+    if checkout == "success" and session_id:
+        params["session_id"] = session_id
+
+    redirect_url = append_query_params(target, params)
+    logger.info("checkout-return redirect checkout=%s target=%s", checkout, redirect_url[:120])
+    return RedirectResponse(redirect_url, status_code=302)
 
 
 def _stripe_subscription_id(session) -> str | None:
