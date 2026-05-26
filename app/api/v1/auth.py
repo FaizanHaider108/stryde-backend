@@ -479,6 +479,7 @@ def google_oauth_poll(poll_id: str):
     if not data:
         return {"ready": False}
 
+    logger.info("Google OAuth poll ready for poll_id=%s", normalized)
     return {
         "ready": True,
         "access_token": data["access_token"],
