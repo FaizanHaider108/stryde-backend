@@ -22,6 +22,16 @@ def list_my_posts(db: Session = Depends(get_db), current_user: User = Depends(ge
     return post_crud.list_user_posts(db, current_user.uid, current_user.uid)
 
 
+@router.post("/share", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
+def share_post(
+    payload: PostCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    post = post_crud.create_post(db, current_user, payload)
+    return post_crud.build_post_response(post, current_user.uid)
+
+
 @router.get("/{user_id:uuid}", response_model=list[PostResponse])
 def list_user_posts(
     user_id: uuid.UUID,

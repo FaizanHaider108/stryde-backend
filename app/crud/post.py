@@ -222,10 +222,17 @@ def create_post(db: Session, user: User, payload: PostCreate) -> Post:
         bool(payload.race_id),
         bool(payload.route_id),
     ])
-    if provided != 1:
+    has_content = bool((payload.caption or "").strip()) or len(payload.images or []) > 0
+
+    if provided > 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Exactly one of run_id, race_id, or route_id must be provided",
+            detail="Only one of run_id, race_id, or route_id can be provided",
+        )
+    if provided == 0 and not has_content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A post must include a caption or at least one image",
         )
 
     if payload.run_id:
