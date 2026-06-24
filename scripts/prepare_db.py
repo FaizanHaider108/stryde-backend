@@ -2,7 +2,9 @@
 Prepare Postgres before uvicorn (Render / Docker).
 
 Fixes:
+- Fresh DB (no alembic_version) → normal upgrade head
 - DuplicateTable on deploy (schema exists, Alembic empty) → stamp base revision, upgrade
+- Partial failed migrate (orphaned enums, no tables) → drop enums, upgrade head
 - Stamped at head but missing columns (e.g. users.apple_sub) → rewind Alembic, upgrade
 
 Never stamps head while columns are missing — that caused signup 500 errors.
@@ -61,6 +63,10 @@ def _public_tables(conn) -> set[str]:
     return {str(r[0]) for r in rows}
 
 
+def _app_tables(conn) -> set[str]:
+    return _public_tables(conn) - {"alembic_version"}
+
+
 def _has_column(conn, table: str, column: str) -> bool:
     from sqlalchemy import text
 
@@ -92,15 +98,64 @@ def _get_revision(conn) -> str | None:
     return str(row[0])
 
 
+def _ensure_alembic_version(conn) -> None:
+    """Create Alembic's version table when missing (fresh or failed first migrate)."""
+    from sqlalchemy import text
+
+    if "alembic_version" in _public_tables(conn):
+        return
+    conn.execute(
+        text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+    )
+    conn.commit()
+
+
 def _set_revision(conn, revision: str) -> None:
     from sqlalchemy import text
 
+    _ensure_alembic_version(conn)
     conn.execute(text("DELETE FROM alembic_version"))
     conn.execute(
         text("INSERT INTO alembic_version (version_num) VALUES (:rev)"),
         {"rev": revision},
     )
     conn.commit()
+
+
+def _orphaned_public_enums(conn) -> list[str]:
+    from sqlalchemy import text
+
+    rows = conn.execute(
+        text(
+            """
+            SELECT t.typname
+            FROM pg_type t
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = 'public' AND t.typtype = 'e'
+            ORDER BY t.typname
+            """
+        )
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def _cleanup_orphaned_enums(conn) -> int:
+    """
+    Drop leftover enum types from a failed first migration (tables never created).
+    Safe only when no application tables exist.
+    """
+    from sqlalchemy import text
+
+    enums = _orphaned_public_enums(conn)
+    if not enums:
+        return 0
+    dropped = 0
+    for name in enums:
+        conn.execute(text(f'DROP TYPE IF EXISTS "{name}" CASCADE'))
+        dropped += 1
+    if dropped:
+        conn.commit()
+    return dropped
 
 
 def _find_schema_rewind(conn) -> str | None:
@@ -148,14 +203,47 @@ def _handle_duplicate_migrate(output: str) -> int:
     """
     Tables already exist from an older schema — mark initial migration as done,
     then run remaining migrations (never stamp head).
+
+    On a fresh DB with no app tables, duplicate errors usually mean orphaned enum
+    types from a failed prior migrate; clean those and retry upgrade from scratch.
     """
-    print(
-        "Migrate reported existing objects — stamping base revision "
-        f"{INITIAL_REVISION}, then upgrading to head.",
-        flush=True,
-    )
     engine = _engine()
     with engine.connect() as conn:
+        app_tables = _app_tables(conn)
+
+        if not app_tables:
+            enums = _orphaned_public_enums(conn)
+            if enums:
+                print(
+                    "Migrate reported existing objects but no app tables — "
+                    f"dropping {len(enums)} orphaned enum type(s), then upgrading.",
+                    flush=True,
+                )
+                dropped = _cleanup_orphaned_enums(conn)
+                print(f"Removed {dropped} orphaned enum type(s).", flush=True)
+            else:
+                print(
+                    "Migrate reported existing objects on an empty schema — "
+                    "retrying upgrade head without stamping.",
+                    flush=True,
+                )
+
+            retry = _upgrade_head()
+            if retry.returncode == 0:
+                if retry.stdout:
+                    print(retry.stdout, end="", flush=True)
+                print("Database migrations complete after empty-schema retry.", flush=True)
+                return 0
+
+            print(retry.stdout, end="", flush=True)
+            print(retry.stderr, end="", flush=True)
+            return retry.returncode
+
+        print(
+            "Migrate reported existing objects — stamping base revision "
+            f"{INITIAL_REVISION}, then upgrading to head.",
+            flush=True,
+        )
         _set_revision(conn, INITIAL_REVISION)
 
     retry = _upgrade_head()
@@ -181,9 +269,13 @@ def main() -> int:
         engine = _engine()
         with engine.connect() as conn:
             tables = _public_tables(conn)
+            app_tables = _app_tables(conn)
             revision = _get_revision(conn)
+            orphaned_enums = _orphaned_public_enums(conn)
         print(
-            f"Public tables: {len(tables)} | Alembic revision: {revision or 'none'}",
+            f"Public tables: {len(tables)} (app: {len(app_tables)}) | "
+            f"Alembic revision: {revision or 'none'} | "
+            f"orphaned enums: {len(orphaned_enums)}",
             flush=True,
         )
     except Exception as exc:
