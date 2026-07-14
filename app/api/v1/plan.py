@@ -214,7 +214,6 @@ def list_plans(
     goal_type: str = Query(None),
 ):
     """Get all plans with optional filtering."""
-    _ensure_active_subscription(db, current_user)
     return plan_crud.get_all_plans(
         db,
         experience_level=experience_level,
@@ -294,7 +293,6 @@ def get_my_active_plan(
     current_user: User = Depends(get_current_user),
 ):
     """Get the user's currently active plan."""
-    _ensure_active_subscription(db, current_user)
     user_plan = plan_crud.get_user_active_plan(db, current_user.uid)
     return user_plan
 
@@ -305,14 +303,13 @@ def get_my_plan_progress(
     current_user: User = Depends(get_current_user),
 ):
     """Get progress stats for user's active plan."""
-    _ensure_active_subscription(db, current_user)
     user_plan = plan_crud.get_user_active_plan(db, current_user.uid)
     if not user_plan:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No active plan",
         )
-    
+
     return plan_crud.get_plan_progress(db, user_plan.id)
 
 
@@ -337,7 +334,6 @@ def get_plan_detail(
     current_user: User = Depends(get_current_user),
 ):
     """Get plan details with all workouts."""
-    _ensure_active_subscription(db, current_user)
     logger.debug("Fetching plan detail for plan_id=%s user_id=%s", plan_id, current_user.uid)
     plan = plan_crud.get_plan_with_workouts(db, plan_id)
     if not plan:

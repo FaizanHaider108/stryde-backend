@@ -63,6 +63,7 @@ def _compute_effective_status(
 def _resolve_backend_public_url() -> str:
     url = (
         os.getenv("BACKEND_PUBLIC_URL")
+        or os.getenv("RENDER_EXTERNAL_URL")
         or os.getenv("GOOGLE_OAUTH_PUBLIC_URL")
         or ""
     ).strip().rstrip("/")

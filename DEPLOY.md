@@ -35,20 +35,20 @@ Do not commit `.env` — it contains secrets.
 **Google Cloud Console** → Web client → Authorized redirect URI (exact):
 
 ```
-hhttps://stryde-backend-s8pi.onrender.com/api/v1/auth/google/callback
+https://stryde-backend-s8pi.onrender.com/api/v1/auth/google/callback
 ```
 
 **Mobile app** (`app/.env`) for Expo Go while API stays on LAN:
 
 ```env
 EXPO_PUBLIC_API_BASE_URL=http://YOUR_LAN_IP:8000
-EXPO_PUBLIC_OAUTH_API_BASE_URL=hhttps://stryde-backend-s8pi.onrender.com
+EXPO_PUBLIC_OAUTH_API_BASE_URL=https://stryde-backend-s8pi.onrender.com
 ```
 
 Verify after deploy:
 
 ```bash
-curl -I "hhttps://stryde-backend-s8pi.onrender.com/api/v1/auth/google/start?app_return=test&after_path=/home"
+curl -I "https://stryde-backend-s8pi.onrender.com/api/v1/auth/google/start?app_return=test&after_path=/home"
 # Expect: HTTP/1.1 302 (not 404)
 ```
 

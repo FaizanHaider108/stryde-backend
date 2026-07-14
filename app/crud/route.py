@@ -979,6 +979,7 @@ async def _request_graphhopper_route(
                 "algorithm": "round_trip",
                 "round_trip.distance": int(target_km * 1000),
                 "round_trip.seed": seed,
+                "ch.disable": "true",
             }
 
             try:
@@ -1158,6 +1159,8 @@ async def _request_osrm_round_trip_route(payload: RouteCreate) -> dict:
 
     best_route: Optional[dict] = None
     best_gap = float("inf")
+    best_intersecting: Optional[dict] = None
+    best_intersecting_gap = float("inf")
 
     for candidate_points in candidates_snapped:
         try:
@@ -1165,10 +1168,14 @@ async def _request_osrm_round_trip_route(payload: RouteCreate) -> dict:
         except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
             continue
 
+        gap = abs(candidate["distance_km"] - target_km)
+
         if _polyline_self_intersects(candidate["map_data"]):
+            if gap < best_intersecting_gap:
+                best_intersecting_gap = gap
+                best_intersecting = candidate
             continue
 
-        gap = abs(candidate["distance_km"] - target_km)
         if gap < best_gap:
             best_gap = gap
             best_route = candidate
@@ -1176,8 +1183,11 @@ async def _request_osrm_round_trip_route(payload: RouteCreate) -> dict:
         if gap <= tolerance_km:
             return candidate
 
-    if best_route and best_gap <= max(1.2, target_km * 0.32):
+    if best_route and best_gap <= max(2.0, target_km * 0.45):
         return best_route
+
+    if best_intersecting:
+        return best_intersecting
 
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,

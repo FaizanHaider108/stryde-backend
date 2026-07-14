@@ -1,9 +1,8 @@
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, logger, status
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from datetime import datetime
 from uuid import UUID
-import uuid
 import re
 
 from app.crud.race import sync_or_create_external_race, get_race_by_id
@@ -49,27 +48,13 @@ async def search_external_races(query: str):
         "events": "T"
     }
     
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, params=params, timeout=10.0)
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=15.0)
             response.raise_for_status()
-        except httpx.TimeoutException:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT, 
-                detail="The external race provider timed out."
-            )
-        except httpx.RequestError as e:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, 
-                detail="External race provider is currently unavailable."
-            )
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, 
-                detail="Received an invalid response from the external provider."
-            )
-            
-    data = response.json()
+        data = response.json()
+    except Exception:
+        return []
     mapped_races = []
     
     for item in data.get("races", []):

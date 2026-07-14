@@ -18,7 +18,7 @@ def list_my_runs(db: Session = Depends(get_db), current_user: User = Depends(get
 
 
 @router.get("/user/{uid:uuid}", response_model=list[RunResponse])
-def list_user_runs(uid: uuid.UUID, db: Session = Depends(get_db)):
+def list_user_runs(uid: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return run_crud.get_user_runs(db, uid)
 
 
