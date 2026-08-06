@@ -133,8 +133,17 @@ async def club_chat_ws(websocket: WebSocket, club_id: uuid.UUID):
                     await websocket.send_json({"type": "error", "detail": "Message too long"})
                     continue
 
+                race_id = None
+                raw_race_id = data.get("race_id")
+                if raw_race_id:
+                    try:
+                        race_id = uuid.UUID(str(raw_race_id))
+                    except (ValueError, TypeError):
+                        await websocket.send_json({"type": "error", "detail": "Invalid race_id"})
+                        continue
+
                 try:
-                    message = chat_crud.create_message(db, user, club_id, body)
+                    message = chat_crud.create_message(db, user, club_id, body, race_id=race_id)
                 except HTTPException as exc:
                     await websocket.send_json({"type": "error", "detail": exc.detail})
                     continue

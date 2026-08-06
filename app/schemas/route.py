@@ -30,7 +30,7 @@ class RouteSave(RouteBase):
     pass
 
 class RouteCreate(RouteBase):
-    pass
+    num_routes: Optional[int] = Field(default=5, ge=1, le=8)
 
 class RouteResponse(RouteBase):
     id: uuid.UUID
@@ -45,3 +45,6 @@ class RouteCreateResponse(BaseModel):
     elevation_gain_m: Optional[float] = None
     elevation_loss_m: Optional[float] = None
     surface_types: Optional[List[str]] = None
+
+class RouteOptionsResponse(BaseModel):
+    routes: List[RouteCreateResponse]

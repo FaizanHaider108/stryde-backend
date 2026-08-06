@@ -6,7 +6,7 @@ from ...lib.db import get_db
 from ...lib.security import get_current_user
 from ...models import User
 from ...crud import route as route_crud
-from ...schemas.route import RouteCreate, RouteResponse, RouteSave, RouteCreateResponse
+from ...schemas.route import RouteCreate, RouteResponse, RouteSave, RouteOptionsResponse
 
 
 
@@ -26,10 +26,10 @@ def get_single_route(route_id: uuid.UUID, db: Session = Depends(get_db), current
         raise HTTPException(status_code=404, detail="Route not found or access denied")
     return route
 
-@router.post("/", response_model=RouteCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=RouteOptionsResponse, status_code=status.HTTP_201_CREATED)
 async def create_route(payload: RouteCreate, current_user: User = Depends(get_current_user)):
-    route = await route_crud.create_route(payload, current_user)
-    return route
+    routes = await route_crud.create_route(payload, current_user)
+    return {"routes": routes}
 
 @router.post("/save", response_model=RouteResponse, status_code=status.HTTP_201_CREATED)
 def save_route(payload: RouteSave, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

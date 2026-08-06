@@ -46,6 +46,8 @@ def update_profile(db: Session, user: User, update_in: PersonalInfoUpdate) -> Us
         user.full_name = data["full_name"]
     if "profile_image_s3_key" in data:
         user.profile_image_s3_key = data["profile_image_s3_key"]
+    if "runner_type" in data:
+        user.runner_type = data["runner_type"]
     if "date_of_birth" in data:
         user.date_of_birth = data["date_of_birth"]
     if "gender" in data:

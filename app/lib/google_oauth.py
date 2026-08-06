@@ -58,7 +58,11 @@ def _google_oauth_public_url() -> str:
         return backend
     if backend.startswith("http://localhost") or backend.startswith("http://127.0.0.1"):
         return backend
-    return backend
+    # BACKEND_PUBLIC_URL is a LAN IP (e.g. 192.168.x.x) or otherwise not a scheme Google
+    # will accept as a redirect_uri. Returning it anyway used to make google_oauth_configured()
+    # report "configured" and only fail once Google itself rejected the redirect — surface
+    # the misconfiguration here instead, as a clear "not configured" error from our own API.
+    return ""
 
 
 def google_oauth_configured() -> bool:

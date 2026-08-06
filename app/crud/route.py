@@ -1,4 +1,5 @@
 from random import random
+import asyncio
 import json
 import math
 
@@ -20,6 +21,17 @@ GRAPHHOPPER_API_KEY = os.getenv("GRAPHHOPPER_API_KEY")
 
 # Detour / multi-leg OSRM: reject midpoint snaps that jump too far (wrong side of block → chords).
 MIDPOINT_MAX_SNAP_DRIFT_M = 150.0
+
+# OSRM candidate routes are evaluated concurrently in batches instead of one request at a
+# time — sequential evaluation of the full candidate set was the main cause of 1+ minute
+# route generation. Batches (rather than one big gather) keep a bound on concurrent load
+# against the public OSRM instance and still allow an early exit once a good match is found.
+CANDIDATE_BATCH_SIZE = 8
+
+# How many distinct route alternatives to hand back to the app when the routing engine
+# has more than one valid candidate on hand (GraphHopper's alternative-route / round-trip
+# seeds naturally produce several — we were previously discarding all but the single best).
+NUM_ROUTE_OPTIONS = 5
 
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 OPEN_ELEVATION_BATCH = 100
@@ -628,14 +640,18 @@ async def _snap_detour_midpoints_for_osrm(
     moved the point too far (likely wrong road / far side of a block). Callers must
     drop None entries instead of routing through raw offset coordinates.
     """
-    out: list[tuple[float, float] | None] = []
-    for lat, lng in points:
+    async def snap_one(point: tuple[float, float]) -> tuple[float, float] | None:
+        lat, lng = point
         s_lat, s_lng = await _snap_to_nearest_walkable_node(lat, lng, terrain_pref)
         dist_m = _haversine_distance_km(lat, lng, s_lat, s_lng) * 1000.0
         if dist_m > MIDPOINT_MAX_SNAP_DRIFT_M:
-            out.append(None)
-        else:
-            out.append((s_lat, s_lng))
+            return None
+        return (s_lat, s_lng)
+
+    out: list[tuple[float, float] | None] = []
+    for start in range(0, len(points), CANDIDATE_BATCH_SIZE):
+        batch = points[start : start + CANDIDATE_BATCH_SIZE]
+        out.extend(await asyncio.gather(*(snap_one(p) for p in batch)))
     return out
 
 
@@ -726,39 +742,49 @@ async def _request_osrm_distance_constrained_route(payload: RouteCreate) -> dict
                     if sc is not None:
                         snap_map[orig] = _format_point(*sc)
 
-        for raw_candidate in raw_candidates:
+        def candidate_points_for(raw_candidate: list[str]) -> list[str]:
             if snap_mids and snap_map:
-                candidate_points = [raw_candidate[0]]
+                points = [raw_candidate[0]]
                 for pt in raw_candidate[1:-1]:
                     if pt in snap_map:
-                        candidate_points.append(snap_map[pt])
-                candidate_points.append(raw_candidate[-1])
-            else:
-                candidate_points = list(raw_candidate)
+                        points.append(snap_map[pt])
+                points.append(raw_candidate[-1])
+                return points
+            return list(raw_candidate)
 
+        async def evaluate_one(raw_candidate: list[str]) -> dict | None:
             try:
-                candidate_route = await _request_osrm_route_for_points(candidate_points, terrain_pref)
+                return await _request_osrm_route_for_points(
+                    candidate_points_for(raw_candidate), terrain_pref
+                )
             except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
-                continue
+                return None
 
-            if _polyline_self_intersects(candidate_route["map_data"]):
-                continue
+        for start in range(0, len(raw_candidates), CANDIDATE_BATCH_SIZE):
+            batch = raw_candidates[start : start + CANDIDATE_BATCH_SIZE]
+            batch_results = await asyncio.gather(*(evaluate_one(c) for c in batch))
 
-            d = candidate_route["distance_km"]
-            meets = _route_meets_target_length(d, target_km)
-            gap = abs(d - target_km) if meets else 0.0
-            if meets:
-                cap = target_km + _distance_max_overshoot_km(target_km)
-                over = max(0.0, d - cap)
-                key = (0, gap, over, _route_backtrack_penalty(candidate_route["map_data"]) * 0.02)
-            else:
-                key = (1, -d, 0.0, 0.0)
+            for candidate_route in batch_results:
+                if candidate_route is None:
+                    continue
+                if _polyline_self_intersects(candidate_route["map_data"]):
+                    continue
 
-            if best_route is None or key < best_key:
-                best_route = candidate_route
-                best_key = key
+                d = candidate_route["distance_km"]
+                meets = _route_meets_target_length(d, target_km)
+                gap = abs(d - target_km) if meets else 0.0
+                if meets:
+                    cap = target_km + _distance_max_overshoot_km(target_km)
+                    over = max(0.0, d - cap)
+                    key = (0, gap, over, _route_backtrack_penalty(candidate_route["map_data"]) * 0.02)
+                else:
+                    key = (1, -d, 0.0, 0.0)
 
-            if meets and gap <= tol:
+                if best_route is None or key < best_key:
+                    best_route = candidate_route
+                    best_key = key
+
+            if best_route is not None and best_key[0] == 0 and best_key[1] <= tol:
                 return
 
     await evaluate_snap_mode(False)
@@ -876,7 +902,7 @@ async def _request_graphhopper_distance_constrained_route(
     gh_profile: str,
     start_pt: str,
     end_pt: str,
-) -> dict:
+) -> list[dict]:
     url = "https://graphhopper.com/api/1/route"
     target_km = float(payload.distance_km)
     strict_tolerance_km = _distance_tolerance_km(target_km)
@@ -938,13 +964,14 @@ async def _request_graphhopper_distance_constrained_route(
             ),
         )
 
-    best_route = min(
+    ranked_routes = sorted(
         clean_routes,
         key=lambda route: abs(route["distance_km"] - target_km) + (_route_backtrack_penalty(route["map_data"]) * 0.08),
     )
 
-    if best_route["distance_km"] >= target_km - strict_tolerance_km:
-        return best_route
+    if ranked_routes[0]["distance_km"] >= target_km - strict_tolerance_km:
+        num_routes = getattr(payload, "num_routes", None) or NUM_ROUTE_OPTIONS
+        return ranked_routes[:num_routes]
 
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -957,7 +984,7 @@ async def _request_graphhopper_route(
     gh_profile: str,
     start_pt: str,
     end_pt: str,
-) -> dict:
+) -> list[dict]:
     is_round_trip = start_pt == end_pt
 
     if not is_round_trip:
@@ -965,57 +992,51 @@ async def _request_graphhopper_route(
 
     url = "https://graphhopper.com/api/1/route"
     target_km = float(payload.distance_km)
-    strict_tolerance_km = max(0.35, target_km * 0.08)
 
     seeds = [int(random() * 1000000) for _ in range(5)]
-    best_route: Optional[dict] = None
-    best_gap = float("inf")
+
+    async def request_seed(client: httpx.AsyncClient, seed: int) -> dict | None:
+        request_params: dict[str, object] = {
+            "point": start_pt,
+            **_graphhopper_common_route_params(gh_profile),
+            "algorithm": "round_trip",
+            "round_trip.distance": int(target_km * 1000),
+            "round_trip.seed": seed,
+            "ch.disable": "true",
+        }
+        try:
+            response = await client.get(url, params=request_params)
+            response.raise_for_status()
+        except (httpx.RequestError, httpx.HTTPStatusError):
+            return None
+
+        data = response.json()
+        paths = data.get("paths") or []
+        if not paths:
+            return None
+
+        candidate = _route_dict_from_graphhopper_path(paths[0])
+        if candidate is None:
+            return None
+        if _polyline_self_intersects(candidate["map_data"]):
+            return None
+        return candidate
 
     async with httpx.AsyncClient() as client:
-        for seed in seeds:
-            request_params: dict[str, object] = {
-                "point": start_pt,
-                **_graphhopper_common_route_params(gh_profile),
-                "algorithm": "round_trip",
-                "round_trip.distance": int(target_km * 1000),
-                "round_trip.seed": seed,
-                "ch.disable": "true",
-            }
+        candidates = await asyncio.gather(*(request_seed(client, seed) for seed in seeds))
 
-            try:
-                response = await client.get(url, params=request_params)
-                response.raise_for_status()
-            except (httpx.RequestError, httpx.HTTPStatusError):
-                continue
+    valid_candidates = [c for c in candidates if c is not None]
+    if not valid_candidates:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not generate a round-trip route for this location. Please try another nearby start point.",
+        )
 
-            data = response.json()
-            paths = data.get("paths") or []
-            if not paths:
-                continue
-
-            path = paths[0]
-            candidate = _route_dict_from_graphhopper_path(path)
-            if candidate is None:
-                continue
-
-            decoded_coords = candidate["map_data"]
-            if _polyline_self_intersects(decoded_coords):
-                continue
-
-            gap = abs(candidate["distance_km"] - target_km)
-            if gap < best_gap:
-                best_gap = gap
-                best_route = candidate
-            if gap <= strict_tolerance_km:
-                return candidate
-
-    if best_route is not None:
-        return best_route
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Could not generate a round-trip route for this location. Please try another nearby start point.",
-    )
+    # Best-effort: return the closest candidates even if none landed within strict
+    # tolerance (matches the previous single-route fallback behavior).
+    ranked_candidates = sorted(valid_candidates, key=lambda c: abs(c["distance_km"] - target_km))
+    num_routes = getattr(payload, "num_routes", None) or NUM_ROUTE_OPTIONS
+    return ranked_candidates[:num_routes]
 
 
 def _offset_origin_point(lat: float, lng: float, north_km: float, east_km: float) -> tuple[float, float]:
@@ -1162,26 +1183,38 @@ async def _request_osrm_round_trip_route(payload: RouteCreate) -> dict:
     best_intersecting: Optional[dict] = None
     best_intersecting_gap = float("inf")
 
-    for candidate_points in candidates_snapped:
+    async def evaluate_one(candidate_points: list[str]) -> dict | None:
         try:
-            candidate = await _request_osrm_route_for_points(candidate_points, terrain_pref)
+            return await _request_osrm_route_for_points(candidate_points, terrain_pref)
         except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
-            continue
+            return None
 
-        gap = abs(candidate["distance_km"] - target_km)
+    for start in range(0, len(candidates_snapped), CANDIDATE_BATCH_SIZE):
+        batch = candidates_snapped[start : start + CANDIDATE_BATCH_SIZE]
+        batch_results = await asyncio.gather(*(evaluate_one(c) for c in batch))
 
-        if _polyline_self_intersects(candidate["map_data"]):
-            if gap < best_intersecting_gap:
-                best_intersecting_gap = gap
-                best_intersecting = candidate
-            continue
+        found_within_tolerance: Optional[dict] = None
+        for candidate in batch_results:
+            if candidate is None:
+                continue
 
-        if gap < best_gap:
-            best_gap = gap
-            best_route = candidate
+            gap = abs(candidate["distance_km"] - target_km)
 
-        if gap <= tolerance_km:
-            return candidate
+            if _polyline_self_intersects(candidate["map_data"]):
+                if gap < best_intersecting_gap:
+                    best_intersecting_gap = gap
+                    best_intersecting = candidate
+                continue
+
+            if gap < best_gap:
+                best_gap = gap
+                best_route = candidate
+
+            if gap <= tolerance_km and found_within_tolerance is None:
+                found_within_tolerance = candidate
+
+        if found_within_tolerance is not None:
+            return found_within_tolerance
 
     if best_route and best_gap <= max(2.0, target_km * 0.45):
         return best_route
@@ -1249,14 +1282,35 @@ def _find_existing_route(db: Session, creator_id: uuid.UUID, payload: RouteCreat
     )
 
 
-async def create_route(payload: RouteCreate, creator: User) -> dict:
+async def _finalize_route_options(routes: list[dict]) -> list[dict]:
+    """Finalize a batch of route candidates concurrently, dropping any that turn out
+    to self-intersect. Raises the same sentinel the single-route path used to raise
+    if every candidate ends up unusable, so callers can fall back to OSRM as before."""
+    finalized = list(await asyncio.gather(*(_finalize_route_geometry(r) for r in routes)))
+    clean = [r for r in finalized if not _polyline_self_intersects(r["map_data"])]
+    if not clean:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GRAPHOPPER_SELF_INTERSECT",
+        )
+    return clean
+
+
+async def create_route(payload: RouteCreate, creator: User) -> list[dict]:
     if not creator or not creator.uid:
         raise HTTPException(status_code=401, detail="User not authenticated")
 
     start_lat, start_lng, end_lat, end_lng = _normalize_route_coordinates(payload)
     terrain_pref = getattr(payload, "terrain", None)
-    start_lat, start_lng = await _snap_to_nearest_walkable_node(start_lat, start_lng, terrain_pref)
-    end_lat, end_lng = await _snap_to_nearest_walkable_node(end_lat, end_lng, terrain_pref)
+    is_round_trip_request = (start_lat, start_lng) == (end_lat, end_lng)
+    if is_round_trip_request:
+        start_lat, start_lng = await _snap_to_nearest_walkable_node(start_lat, start_lng, terrain_pref)
+        end_lat, end_lng = start_lat, start_lng
+    else:
+        (start_lat, start_lng), (end_lat, end_lng) = await asyncio.gather(
+            _snap_to_nearest_walkable_node(start_lat, start_lng, terrain_pref),
+            _snap_to_nearest_walkable_node(end_lat, end_lng, terrain_pref),
+        )
     normalized_payload = payload.model_copy(
         update={
             "start_lat": start_lat,
@@ -1279,14 +1333,8 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
     if GRAPHHOPPER_API_KEY:
         fallback_error_detail: Optional[str] = None
         try:
-            gh_result = await _request_graphhopper_route(normalized_payload, gh_profile, start_pt, end_pt)
-            finalized = await _finalize_route_geometry(gh_result)
-            if _polyline_self_intersects(finalized["map_data"]):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="GRAPHOPPER_SELF_INTERSECT",
-                )
-            return finalized
+            gh_results = await _request_graphhopper_route(normalized_payload, gh_profile, start_pt, end_pt)
+            return await _finalize_route_options(gh_results)
         except HTTPException as exc:
             if str(exc.detail) == "GRAPHOPPER_ROUTE_TOO_SHORT":
                 try:
@@ -1294,7 +1342,7 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
                         osrm_result = await _request_osrm_distance_constrained_route(normalized_payload)
                     else:
                         osrm_result = await _request_osrm_round_trip_route(normalized_payload)
-                    return await _finalize_route_geometry(osrm_result)
+                    return await _finalize_route_options([osrm_result])
                 except HTTPException as osrm_exc:
                     raise HTTPException(
                         status_code=osrm_exc.status_code,
@@ -1326,7 +1374,7 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
                 osrm_result = await _request_osrm_distance_constrained_route(normalized_payload)
             else:
                 osrm_result = await _request_osrm_round_trip_route(normalized_payload)
-            return await _finalize_route_geometry(osrm_result)
+            return await _finalize_route_options([osrm_result])
         except HTTPException as osrm_exc:
             if fallback_error_detail:
                 raise HTTPException(
@@ -1337,10 +1385,10 @@ async def create_route(payload: RouteCreate, creator: User) -> dict:
 
     if start_pt != end_pt:
         osrm_only = await _request_osrm_distance_constrained_route(normalized_payload)
-        return await _finalize_route_geometry(osrm_only)
+        return await _finalize_route_options([osrm_only])
 
     rt_only = await _request_osrm_round_trip_route(normalized_payload)
-    return await _finalize_route_geometry(rt_only)
+    return await _finalize_route_options([rt_only])
 
 
 def save_route(db: Session, creator: User, payload: RouteSave) -> Route:

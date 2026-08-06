@@ -15,11 +15,15 @@ class ClubMessage(Base):
     club_id = Column(Uuid, ForeignKey("clubs.id", ondelete="CASCADE"), nullable=False, index=True)
     sender_id = Column(Uuid, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
     body = Column(Text, nullable=False)
+    # Optional link so a shared race can be opened directly from the chat message
+    # instead of just showing its name as plain text.
+    race_id = Column(Uuid, ForeignKey("races.id", ondelete="SET NULL"), nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     club = relationship("Club", back_populates="messages")
     sender = relationship("User", back_populates="club_messages")
+    race = relationship("Race", back_populates="club_messages")
     reads = relationship("ClubMessageRead", back_populates="message", cascade="all, delete-orphan")
 
 

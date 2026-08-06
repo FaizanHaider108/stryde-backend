@@ -1,4 +1,6 @@
-from sqlalchemy.orm import Session
+import math
+from sqlalchemy import func
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
 import uuid
@@ -7,14 +9,51 @@ from fastapi import HTTPException, status
 
 from ..lib.notifications import notify_user
 from ..models import Club, ClubMember, ClubRole, ClubInvitation, InvitationStatus, NotificationType, User
+from ..models.user import RunnerType
+from ..schemas.club import ClubUpdate
+
+# Club responses always serialize members[].user — eager-load both in one shot
+# instead of one query per club plus one query per member (N+1).
+_CLUB_WITH_MEMBERS = selectinload(Club.members).selectinload(ClubMember.user)
 
 
-def create_club(db: Session, owner: User, name: str, description: Optional[str] = None, image_url: Optional[str] = None) -> Club:
+def _haversine_distance_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius_km = 6371.0
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lng = math.radians(lng2 - lng1)
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lng / 2) ** 2
+    )
+    return 2 * radius_km * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def create_club(
+    db: Session,
+    owner: User,
+    name: str,
+    description: Optional[str] = None,
+    image_url: Optional[str] = None,
+    runner_type: Optional[RunnerType] = None,
+    state: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+) -> Club:
     """Create a new club and attach the owner as a member with role `owner`.
 
     Raises HTTPException(status_code=400) on DB errors.
     """
-    club = Club(name=name, description=description, image_url=image_url)
+    club = Club(
+        name=name,
+        description=description,
+        image_url=image_url,
+        runner_type=runner_type,
+        state=state,
+        latitude=latitude,
+        longitude=longitude,
+    )
     try:
         db.add(club)
         db.flush()
@@ -28,16 +67,84 @@ def create_club(db: Session, owner: User, name: str, description: Optional[str] 
     return club
 
 
+def update_club(db: Session, owner: User, club: Club, update_in: ClubUpdate) -> Club:
+    """Update a club's descriptive/discovery fields. Owner-only."""
+    if getattr(club, "is_deleted", False):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="club not found")
+
+    owner_membership = db.query(ClubMember).filter(ClubMember.club_id == club.id, ClubMember.user_id == owner.uid).first()
+    if not owner_membership or owner_membership.role != ClubRole.owner:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only club owner can update club")
+
+    data = update_in.dict(exclude_unset=True)
+    for field in ("name", "description", "image_url", "runner_type", "state", "latitude", "longitude"):
+        if field in data:
+            setattr(club, field, data[field])
+
+    try:
+        db.add(club)
+        db.commit()
+        db.refresh(club)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not update club") from exc
+    return club
+
+
 def get_club(db: Session, club_id: str) -> Optional[Club]:
     try:
         club_uuid = uuid.UUID(club_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid club id")
-    return db.query(Club).filter(Club.id == club_uuid, ~Club.is_deleted).first()
+    return (
+        db.query(Club)
+        .options(_CLUB_WITH_MEMBERS)
+        .filter(Club.id == club_uuid, ~Club.is_deleted)
+        .first()
+    )
 
 
-def list_clubs(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(Club).filter(~Club.is_deleted).offset(skip).limit(limit).all()
+def list_clubs(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    runner_type: Optional[RunnerType] = None,
+    state: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    max_distance_km: Optional[float] = None,
+) -> list[Club]:
+    query = db.query(Club).options(_CLUB_WITH_MEMBERS).filter(~Club.is_deleted)
+
+    if runner_type is not None:
+        query = query.filter(Club.runner_type == runner_type)
+    if state:
+        query = query.filter(func.lower(Club.state) == state.strip().lower())
+
+    if lat is None or lng is None:
+        return query.offset(skip).limit(limit).all()
+
+    # Distance filtering/sorting is done in Python (haversine) rather than in SQL so it
+    # behaves the same on SQLite (dev) and Postgres (prod) without a PostGIS dependency.
+    # Club counts here are small enough that this stays cheap.
+    with_distance: list[tuple[float, Club]] = []
+    without_location: list[Club] = []
+    for club in query.all():
+        if club.latitude is None or club.longitude is None:
+            without_location.append(club)
+            continue
+        distance_km = _haversine_distance_km(lat, lng, club.latitude, club.longitude)
+        if max_distance_km is not None and distance_km > max_distance_km:
+            continue
+        club.distance_km = round(distance_km, 2)
+        with_distance.append((distance_km, club))
+
+    with_distance.sort(key=lambda pair: pair[0])
+    ordered = [club for _, club in with_distance]
+    if max_distance_km is None:
+        ordered.extend(without_location)
+
+    return ordered[skip: skip + limit]
 
 
 def invite_member(db: Session, inviter: User, club: Club, invitee_uid: str) -> ClubInvitation:
@@ -249,7 +356,12 @@ def get_or_create_community(db: Session) -> Club:
     The community is a special club owned by the system and visible to all users.
     """
     # Look for existing community
-    community = db.query(Club).filter(Club.is_community, ~Club.is_deleted).first()
+    community = (
+        db.query(Club)
+        .options(_CLUB_WITH_MEMBERS)
+        .filter(Club.is_community, ~Club.is_deleted)
+        .first()
+    )
     if community:
         return community
     

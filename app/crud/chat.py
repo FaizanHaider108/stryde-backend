@@ -6,8 +6,10 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from ..models import Club, ClubMember, ClubMessage, ClubMessageRead, User
-from ..schemas.chat import ClubMessageOut, MessageReadOut, MessageSender
+from ..models import Club, ClubMember, ClubMessage, ClubMessageRead, Race, User
+from ..schemas.chat import ClubMessageOut, MessageReadOut, MessageSender, RaceSummary
+
+_MESSAGE_LOAD_OPTIONS = (selectinload(ClubMessage.sender), selectinload(ClubMessage.reads), selectinload(ClubMessage.race))
 
 
 def _get_club(db: Session, club_id: uuid.UUID) -> Club:
@@ -41,23 +43,48 @@ def build_message_out(message: ClubMessage, current_user_id: Optional[uuid.UUID]
             profile_image_s3_key=message.sender.profile_image_s3_key,
         )
 
+    race = None
+    if message.race:
+        race = RaceSummary(
+            id=message.race.id,
+            name=message.race.name,
+            cover_image_url=message.race.cover_image_url,
+            start_time=message.race.start_time,
+            location_text=message.race.location_text,
+            distance_label=message.race.distance_label,
+            distance_km=message.race.distance_km,
+        )
+
     return ClubMessageOut(
         id=message.id,
         club_id=message.club_id,
         sender_id=message.sender_id,
         sender=sender,
         body=message.body,
+        race_id=message.race_id,
+        race=race,
         created_at=message.created_at,
         reads=[MessageReadOut(user_id=r.user_id, read_at=r.read_at) for r in reads],
         is_read_by_current_user=is_read,
     )
 
 
-def create_message(db: Session, sender: User, club_id: uuid.UUID, body: str) -> ClubMessage:
+def create_message(
+    db: Session,
+    sender: User,
+    club_id: uuid.UUID,
+    body: str,
+    race_id: Optional[uuid.UUID] = None,
+) -> ClubMessage:
     club = _get_club(db, club_id)
     _ensure_member(db, club, sender)
 
-    message = ClubMessage(club_id=club.id, sender_id=sender.uid, body=body)
+    if race_id is not None:
+        race = db.query(Race).filter(Race.id == race_id).first()
+        if not race:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="race not found")
+
+    message = ClubMessage(club_id=club.id, sender_id=sender.uid, body=body, race_id=race_id)
     now = datetime.now(timezone.utc)
     try:
         db.add(message)
@@ -70,7 +97,7 @@ def create_message(db: Session, sender: User, club_id: uuid.UUID, body: str) -> 
 
     return (
         db.query(ClubMessage)
-        .options(selectinload(ClubMessage.sender), selectinload(ClubMessage.reads))
+        .options(*_MESSAGE_LOAD_OPTIONS)
         .filter(ClubMessage.id == message.id)
         .first()
     )
@@ -88,7 +115,7 @@ def list_messages(
 
     query = (
         db.query(ClubMessage)
-        .options(selectinload(ClubMessage.sender), selectinload(ClubMessage.reads))
+        .options(*_MESSAGE_LOAD_OPTIONS)
         .filter(ClubMessage.club_id == club.id)
     )
     if before:

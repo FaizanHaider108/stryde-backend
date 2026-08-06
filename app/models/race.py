@@ -66,6 +66,7 @@ class Race(Base):
     registered_participants = relationship("User", secondary=registered_races, back_populates="registered_races")
     runs = relationship("Run", back_populates="race")
     posts = relationship("Post", back_populates="race")
+    club_messages = relationship("ClubMessage", back_populates="race")
 
     __table_args__ = (
         UniqueConstraint("external_id", "external_provider", name="uix_internal_race"),

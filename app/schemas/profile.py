@@ -99,6 +99,7 @@ class PersonalInfoCreate(BaseModel):
 class PersonalInfoUpdate(BaseModel):
     profile_image_s3_key: Optional[str] = None
     full_name: Optional[str] = None
+    runner_type: Optional[RunnerType] = None
     date_of_birth: Optional[date] = None
     gender: Optional[Gender] = None
     height: Optional[HeightPayload] = None

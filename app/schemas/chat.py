@@ -13,6 +13,19 @@ class MessageSender(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RaceSummary(BaseModel):
+    """Compact race info attached to a club message so the app can open the race directly."""
+    id: uuid.UUID
+    name: str
+    cover_image_url: Optional[str] = None
+    start_time: datetime
+    location_text: str
+    distance_label: str
+    distance_km: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MessageReadOut(BaseModel):
     user_id: uuid.UUID
     read_at: datetime
@@ -26,6 +39,8 @@ class ClubMessageOut(BaseModel):
     sender_id: uuid.UUID
     sender: Optional[MessageSender] = None
     body: str
+    race_id: Optional[uuid.UUID] = None
+    race: Optional[RaceSummary] = None
     created_at: datetime
     reads: list[MessageReadOut] = Field(default_factory=list)
     is_read_by_current_user: bool = False

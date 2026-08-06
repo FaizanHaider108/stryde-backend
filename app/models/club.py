@@ -5,10 +5,11 @@ Grouped attributes: primary keys, columns, timestamps, then relationships.
 import enum
 import uuid
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Enum, Text, func, Uuid, Boolean
+from sqlalchemy import Column, String, DateTime, Float, ForeignKey, Enum, Text, func, Uuid, Boolean
 from sqlalchemy.orm import relationship
 
 from ..lib.db import Base
+from .user import RunnerType
 
 
 class ClubRole(str, enum.Enum):
@@ -55,6 +56,12 @@ class Club(Base):
     description = Column(Text, nullable=True)
     image_url = Column(String, nullable=True)
     is_community = Column(Boolean, nullable=False, server_default="false", index=True)
+
+    # Discovery / search fields
+    runner_type = Column(Enum(RunnerType), nullable=True)
+    state = Column(String, nullable=True, index=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())

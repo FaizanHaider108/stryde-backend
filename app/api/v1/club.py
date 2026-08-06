@@ -1,12 +1,16 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import uuid
 from ...lib.db import get_db
 from ...lib.security import get_current_user
 from ...models import User
+from ...models.user import RunnerType
 from ...crud import club as club_crud
 from ...schemas.club import (
     ClubCreate,
+    ClubUpdate,
     ClubOut,
     ClubMemberOut,
     InvitePayload,
@@ -18,13 +22,39 @@ router = APIRouter(prefix="/api/v1/clubs", tags=["clubs"])
 
 @router.post("/", response_model=ClubOut, status_code=status.HTTP_201_CREATED)
 def create_club(payload: ClubCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    club = club_crud.create_club(db, current_user, payload.name, payload.description, payload.image_url)
+    club = club_crud.create_club(
+        db,
+        current_user,
+        payload.name,
+        payload.description,
+        payload.image_url,
+        runner_type=payload.runner_type,
+        state=payload.state,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+    )
     return club
 
 
 @router.get("/", response_model=list[ClubOut])
-def list_clubs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return club_crud.list_clubs(db)
+def list_clubs(
+    runner_type: Optional[RunnerType] = None,
+    state: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    max_distance_km: Optional[float] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List clubs, optionally filtered by runner type, state, and/or distance from (lat, lng)."""
+    return club_crud.list_clubs(
+        db,
+        runner_type=runner_type,
+        state=state,
+        lat=lat,
+        lng=lng,
+        max_distance_km=max_distance_km,
+    )
 
 
 @router.get("/community", response_model=ClubOut)
@@ -46,6 +76,14 @@ def get_club(club_id: uuid.UUID, db: Session = Depends(get_db), current_user: Us
     if not club:
         raise HTTPException(status_code=404, detail="club not found")
     return club
+
+@router.patch("/{club_id:uuid}", response_model=ClubOut)
+def update_club(club_id: uuid.UUID, payload: ClubUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    club = club_crud.get_club(db, str(club_id))
+    if not club:
+        raise HTTPException(status_code=404, detail="club not found")
+    return club_crud.update_club(db, current_user, club, payload)
+
 
 @router.post("/{club_id:uuid}/invite", response_model=InvitationOut)
 def invite(club_id: uuid.UUID, payload: InvitePayload, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
