@@ -36,6 +36,14 @@ NUM_ROUTE_OPTIONS = 5
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 OPEN_ELEVATION_BATCH = 100
 
+# The public OSRM demo instance (routing.openstreetmap.de) has no uptime guarantee and is
+# occasionally down outright. A flat httpx timeout doesn't reliably bound how long a dead
+# TCP endpoint takes to fail in every environment — the connect phase specifically can hang
+# well past the nominal timeout. Splitting it out with a short, explicit connect deadline
+# makes an unreachable server fail fast and predictably instead of stalling every request
+# that touches it.
+OSRM_TIMEOUT = httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=5.0)
+
 
 def _osrm_route_base(terrain_pref: object | None) -> str:
     """OSRM public instance: bike routing is closer to trail networks when terrain is unpaved."""
@@ -544,7 +552,10 @@ async def _request_osrm_route_for_points(points: list[str], terrain_pref: object
         "geometries": "geojson",
     }
 
-    async with httpx.AsyncClient() as client:
+    # This is the hottest OSRM call site — every candidate route, both point-to-point and
+    # loop fallback, goes through it — so a short, explicit connect timeout matters most
+    # here (see OSRM_TIMEOUT).
+    async with httpx.AsyncClient(timeout=OSRM_TIMEOUT) as client:
         response = await client.get(url, params=params)
         response.raise_for_status()
         data = response.json()
@@ -584,7 +595,7 @@ async def _request_osrm_nearest(
     params = {"number": 1}
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=OSRM_TIMEOUT) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
             data = response.json()
@@ -620,7 +631,7 @@ async def _snap_to_nearest_walkable_node(
     url = f"{base}/{lng},{lat}"
     params = {"number": 1}
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=OSRM_TIMEOUT) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()
@@ -1011,13 +1022,16 @@ async def _request_graphhopper_loop_route(
     seeds = [int(random() * 1000000) for _ in range(5)]
 
     async def request_seed(client: httpx.AsyncClient, seed: int) -> dict | None:
+        # No custom_model/ch.disable here — round_trip doesn't use a custom model, and
+        # ch.disable ("flexible mode") is rejected outright on free-tier GraphHopper keys
+        # ("Free packages cannot use flexible mode"), which used to make every single seed
+        # fail every time, silently forcing every loop request onto the slower OSRM fallback.
         request_params: dict[str, object] = {
             "point": start_pt,
             **_graphhopper_common_route_params(gh_profile),
             "algorithm": "round_trip",
             "round_trip.distance": int(target_km * 1000),
             "round_trip.seed": seed,
-            "ch.disable": "true",
         }
         try:
             response = await client.get(url, params=request_params)
@@ -1030,12 +1044,14 @@ async def _request_graphhopper_loop_route(
         if not paths:
             return None
 
-        candidate = _route_dict_from_graphhopper_path(paths[0])
-        if candidate is None:
-            return None
-        if _polyline_self_intersects(candidate["map_data"]):
-            return None
-        return candidate
+        # No self-intersection veto here (unlike our own synthetic offset-point candidates
+        # below): GraphHopper's round_trip algorithm is a purpose-built, professionally
+        # maintained routing engine, not a naive geometric heuristic. In a real street grid
+        # a walking/running loop legitimately crossing its own path — e.g. using the same
+        # crosswalk twice — is completely normal, not a routing defect. Rejecting on that
+        # basis was discarding good, real routes and forcing every loop request onto the
+        # slower fallback tiers for no reason.
+        return _route_dict_from_graphhopper_path(paths[0])
 
     async with httpx.AsyncClient() as client:
         candidates = await asyncio.gather(*(request_seed(client, seed) for seed in seeds))
@@ -1061,11 +1077,19 @@ async def generate_loop_route(
 ) -> list[dict]:
     """Single entry point for loop/round-trip route generation: a start point + target
     distance in, a ranked list of routes that start and end at that same point out.
+    Three tiers, each only tried if the previous one fails:
 
-    GraphHopper's native round_trip algorithm is tried first — 5 seeds fired concurrently,
-    normally fast (a couple of seconds). OSRM's candidate search only runs as a fallback
-    when GraphHopper is unavailable or every seed fails, so the common case never pays for
-    the slower path.
+    1. GraphHopper's native round_trip algorithm — 5 seeds fired concurrently, normally
+       fast (a couple of seconds). The common case; nothing past here runs if it succeeds.
+    2. GraphHopper's ordinary multi-point routing, walked through offset waypoints back to
+       start — doesn't need round_trip support at all, so it survives even if GraphHopper's
+       round_trip algorithm specifically can't find anything for this point/distance. Tried
+       before OSRM because it's the same, confirmed-reachable provider as tier 1.
+    3. OSRM's candidate search — a completely different engine, tried last: it depends on
+       a public demo instance with no uptime guarantee (routing.openstreetmap.de), which is
+       occasionally down outright, so putting it last avoids paying for its full timeout
+       chain on every request when the first two tiers — both on a provider already known
+       to be reachable — are far more likely to succeed.
     """
     if not GRAPHHOPPER_API_KEY:
         return await _request_osrm_round_trip_route(payload)
@@ -1086,6 +1110,11 @@ async def generate_loop_route(
         fallback_error_detail = f"Error connecting to GraphHopper API: {str(exc)}"
 
     try:
+        return await _request_graphhopper_waypoint_loop_route(payload, gh_profile, start_pt)
+    except HTTPException as wp_exc:
+        fallback_error_detail = f"{fallback_error_detail}. {wp_exc.detail}"
+
+    try:
         return await _request_osrm_round_trip_route(payload)
     except HTTPException as osrm_exc:
         raise HTTPException(
@@ -1099,6 +1128,65 @@ def _offset_origin_point(lat: float, lng: float, north_km: float, east_km: float
     lng_scale = max(111.32 * math.cos(math.radians(lat)), 0.0001)
     offset_lng = lng + (east_km / lng_scale)
     return offset_lat, offset_lng
+
+
+async def _request_graphhopper_waypoint_loop_route(
+    payload: RouteCreate,
+    gh_profile: str,
+    start_pt: str,
+) -> list[dict]:
+    """Last-resort loop strategy, tried only if both GraphHopper's round_trip algorithm
+    and the OSRM candidate search fail (e.g. the public OSRM demo instance being down,
+    which has no uptime guarantee). Routes through offset waypoints and back to start
+    using GraphHopper's ordinary multi-point routing — the same request shape as
+    point-to-point routes, which already retries without custom_model/ch.disable on a
+    free-tier "flexible mode" rejection (see _request_graphhopper_route_for_points), so
+    it doesn't depend on round_trip support or any third-party service beyond GraphHopper
+    itself, which is otherwise confirmed reachable at this point in the fallback chain.
+    """
+    start_lat = float(payload.start_lat)
+    start_lng = float(payload.start_lng)
+    target_km = float(payload.distance_km)
+
+    orientation_vectors = [
+        (1.0, 0.0, 0.0, 1.0),
+        (-1.0, 0.0, 0.0, -1.0),
+        (0.0, 1.0, -1.0, 0.0),
+        (0.0, -1.0, 1.0, 0.0),
+    ]
+    scales = (0.22, 0.32, 0.45, 0.6, 0.78)
+
+    candidate_point_sets: list[list[str]] = []
+    for scale in scales:
+        radius_km = max(target_km * scale, 0.15)
+        for n1, e1, n2, e2 in orientation_vectors:
+            p1 = _offset_origin_point(start_lat, start_lng, n1 * radius_km, e1 * radius_km)
+            p2 = _offset_origin_point(start_lat, start_lng, n2 * radius_km, e2 * radius_km)
+            candidate_point_sets.append([start_pt, _format_point(*p1), _format_point(*p2), start_pt])
+
+    async def evaluate_one(points: list[str]) -> dict | None:
+        try:
+            return await _request_graphhopper_route_for_points(points, payload, gh_profile)
+        except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
+            return None
+
+    results = await asyncio.gather(*(evaluate_one(pts) for pts in candidate_point_sets))
+
+    ranked = sorted(
+        (r for r in results if r is not None),
+        key=lambda r: abs(r["distance_km"] - target_km),
+    )
+    if not ranked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Could not generate a round-trip close to {round(target_km, 2)} km for this point. "
+                "Try a slightly larger target distance or a nearby start point."
+            ),
+        )
+
+    num_routes = getattr(payload, "num_routes", None) or NUM_ROUTE_OPTIONS
+    return ranked[:num_routes]
 
 
 async def _snap_waypoints_via_overpass(
@@ -1332,17 +1420,19 @@ def _find_existing_route(db: Session, creator_id: uuid.UUID, payload: RouteCreat
 
 
 async def _finalize_route_options(routes: list[dict]) -> list[dict]:
-    """Finalize a batch of route candidates concurrently, dropping any that turn out
-    to self-intersect. Raises the same sentinel the single-route path used to raise
-    if every candidate ends up unusable, so callers can fall back to OSRM as before."""
-    finalized = list(await asyncio.gather(*(_finalize_route_geometry(r) for r in routes)))
-    clean = [r for r in finalized if not _polyline_self_intersects(r["map_data"])]
-    if not clean:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GRAPHOPPER_SELF_INTERSECT",
-        )
-    return clean
+    """Finalize a batch of route candidates concurrently (recompute distance/elevation
+    from the already-decided polyline; _finalize_route_geometry never changes lat/lng).
+
+    Deliberately does NOT re-check self-intersection here. Every candidate source that
+    needs that check already applies it at generation time (point-to-point GraphHopper/OSRM,
+    and our own synthetic offset-point loop candidates) — re-checking here was pure
+    redundancy for those. For GraphHopper's native round_trip results specifically, no
+    source-level check is applied at all, intentionally: a real walking/running loop
+    legitimately crossing its own path (e.g. the same crosswalk twice) is normal in a real
+    street grid, not a routing defect, and rejecting on that basis was discarding good
+    routes and forcing every loop request onto much slower fallback tiers for no reason.
+    """
+    return list(await asyncio.gather(*(_finalize_route_geometry(r) for r in routes)))
 
 
 async def create_route(payload: RouteCreate, creator: User) -> list[dict]:
