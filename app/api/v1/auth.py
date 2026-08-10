@@ -324,6 +324,25 @@ def google_oauth_setup_info():
     }
 
 
+_ALLOWED_APP_RETURN_SCHEMES = {"stryde", "exp", "exps"}
+
+
+def _validate_app_return(app_return: str) -> str:
+    """
+    Only allow redirecting back into our own app (stryde://) or the Expo Go dev client
+    (exp://). Without this, app_return was passed straight into a signed OAuth state and
+    then used as the final 302 target after a real Google sign-in completed — a classic
+    open-redirect that could hand a freshly-issued exchange code (and thus the victim's
+    real Stryde access/refresh tokens) to an attacker-controlled https:// URL. This was
+    already being probed against in production logs before this check existed.
+    """
+    value = app_return.strip()
+    scheme = urlparse(value).scheme.lower()
+    if not value or scheme not in _ALLOWED_APP_RETURN_SCHEMES:
+        raise HTTPException(status_code=400, detail="Invalid app_return")
+    return value
+
+
 @router.get("/google/start")
 def google_oauth_start(
     app_return: str,
@@ -343,8 +362,7 @@ def google_oauth_start(
                 "GOOGLE_OAUTH_PUBLIC_URL (https ngrok/Render URL — Google rejects 192.168.x.x)."
             ),
         )
-    if not app_return.strip():
-        raise HTTPException(status_code=400, detail="app_return is required")
+    app_return = _validate_app_return(app_return)
 
     try:
         callback = google_callback_uri()
@@ -416,6 +434,7 @@ def google_oauth_callback(
         logger.info("Google OAuth callback OK for %s — redirecting to app", email)
 
         xcode = create_google_oauth_exchange_code(
+            db,
             access_token,
             refresh_token,
             after_path,
@@ -433,11 +452,12 @@ def google_oauth_callback(
         logger.exception("Google OAuth callback failed")
         message = str(exc) if str(exc) else "Google sign-in failed"
         try:
+            db.rollback()
             if state:
                 decoded = decode_google_oauth_state(state)
                 failed_poll = str(decoded.get("poll") or "")
                 if failed_poll:
-                    register_google_oauth_poll_error(failed_poll, message)
+                    register_google_oauth_poll_error(db, failed_poll, message)
         except Exception:
             pass
         redirect_url = append_query_params(
@@ -448,10 +468,10 @@ def google_oauth_callback(
 
 
 @router.post("/google/complete", response_model=GoogleOAuthCompleteResponse)
-def google_oauth_complete(payload: GoogleOAuthCompleteRequest):
+def google_oauth_complete(payload: GoogleOAuthCompleteRequest, db: Session = Depends(get_db)):
     """Exchange a short-lived code from the OAuth deep link for Stryde JWT tokens."""
     try:
-        data = consume_google_oauth_exchange_code(payload.xcode)
+        data = consume_google_oauth_exchange_code(db, payload.xcode)
         return GoogleOAuthCompleteResponse(
             access_token=data["access_token"],
             refresh_token=data["refresh_token"],
@@ -462,7 +482,7 @@ def google_oauth_complete(payload: GoogleOAuthCompleteRequest):
 
 
 @router.get("/google/poll")
-def google_oauth_poll(poll_id: str):
+def google_oauth_poll(poll_id: str, db: Session = Depends(get_db)):
     """
     Expo Go fallback: app polls after the Google browser closes.
     Returns tokens once backend callback finishes — no deep link required.
@@ -472,7 +492,7 @@ def google_oauth_poll(poll_id: str):
         raise HTTPException(status_code=400, detail="poll_id is required")
 
     try:
-        data = poll_google_oauth_exchange(normalized)
+        data = poll_google_oauth_exchange(db, normalized)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

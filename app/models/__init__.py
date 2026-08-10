@@ -13,3 +13,4 @@ from .password_reset import PasswordResetToken
 from .chat import ClubMessage, ClubMessageRead
 from .notification import Notification, NotificationType
 from .subscription import UserSubscription
+from .google_oauth_exchange import GoogleOAuthExchange
