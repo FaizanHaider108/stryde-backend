@@ -26,7 +26,20 @@ MIDPOINT_MAX_SNAP_DRIFT_M = 150.0
 # time — sequential evaluation of the full candidate set was the main cause of 1+ minute
 # route generation. Batches (rather than one big gather) keep a bound on concurrent load
 # against the public OSRM instance and still allow an early exit once a good match is found.
-CANDIDATE_BATCH_SIZE = 8
+# Point-to-point requests build up to ~96 candidates (see _build_detour_candidate_point_sets)
+# and, when the direct route doesn't hit tolerance, can run this search twice (once raw, once
+# with snapped midpoints) — at the old batch size of 8 that's ~24 sequential network round
+# trips, each allowed up to OSRM_TIMEOUT's 8s read timeout, which is what drove point-to-point
+# generation past a minute even though loop routes (a different, GraphHopper-only code path)
+# stayed fast. Raising this cuts sequential rounds ~3x; the hard budget below bounds the rest.
+CANDIDATE_BATCH_SIZE = 24
+
+# Hard ceiling on the whole detour-candidate search in _request_osrm_distance_constrained_route
+# (both the raw and snapped-midpoint passes combined). Once exceeded, remaining batches/passes
+# are skipped and whichever candidate is already best gets used — same minimum-length
+# correctness check as the normal path (_route_meets_target_length), just bounded latency
+# instead of exhaustively working through every candidate.
+OSRM_DETOUR_SEARCH_BUDGET_S = 10.0
 
 # How many distinct route alternatives to hand back to the app when the routing engine
 # has more than one valid candidate on hand (GraphHopper's alternative-route / round-trip
@@ -847,9 +860,21 @@ async def _request_osrm_distance_constrained_route(payload: RouteCreate) -> dict
             if best_route is not None and best_key[0] == 0 and best_key[1] <= tol:
                 return
 
-    await evaluate_snap_mode(False)
-    if best_route is None or not _route_meets_target_length(best_route["distance_km"], target_km):
-        await evaluate_snap_mode(True)
+    async def _run_detour_search() -> None:
+        await evaluate_snap_mode(False)
+        if best_route is None or not _route_meets_target_length(best_route["distance_km"], target_km):
+            await evaluate_snap_mode(True)
+
+    try:
+        # Hard cap on the whole search, not just a per-batch timeout: a batch that's merely
+        # slow (rather than failing outright) still counts toward OSRM_TIMEOUT's read timeout,
+        # so without this the two-pass loop above could still run for minutes. best_route/
+        # best_key are updated incrementally as each batch completes (nonlocal), so whatever
+        # was found before the deadline survives cancellation — we just stop searching for
+        # something better instead of returning nothing.
+        await asyncio.wait_for(_run_detour_search(), timeout=OSRM_DETOUR_SEARCH_BUDGET_S)
+    except asyncio.TimeoutError:
+        pass
 
     if best_route is None or not _route_meets_target_length(best_route["distance_km"], target_km):
         raise HTTPException(
