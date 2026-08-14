@@ -35,6 +35,15 @@ NUM_ROUTE_OPTIONS = 5
 
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 OPEN_ELEVATION_BATCH = 100
+# This public instance is well known to be slow/unreliable, and routes with several hundred
+# points need multiple batches. Fetching batches one-at-a-time (previously a sequential for
+# loop) meant total elevation-enrichment time was the SUM of every batch's latency — for a
+# route needing 5-9 batches at up to 12s each, that alone accounted for 60+ second route
+# generation. Batches now fire concurrently, and the whole step is hard-capped so a slow or
+# unresponsive public API can never stall route generation — elevation is a nice-to-have,
+# not worth blocking the response for.
+OPEN_ELEVATION_BATCH_TIMEOUT = httpx.Timeout(connect=3.0, read=6.0, write=3.0, pool=3.0)
+OPEN_ELEVATION_TOTAL_BUDGET_S = 5.0
 
 # The public OSRM demo instance (routing.openstreetmap.de) has no uptime guarantee and is
 # occasionally down outright. A flat httpx timeout doesn't reliably bound how long a dead
@@ -688,32 +697,54 @@ def _polyline_has_point_elevation(coords: list[dict]) -> bool:
     return any(c.get("elevation_m") is not None for c in coords)
 
 
+async def _fetch_open_elevation_batch(
+    client: httpx.AsyncClient, coords: list[dict], start: int
+) -> tuple[int, list[dict]] | None:
+    chunk = coords[start : start + OPEN_ELEVATION_BATCH]
+    locations = [
+        {"latitude": float(c["latitude"]), "longitude": float(c["longitude"])} for c in chunk
+    ]
+    try:
+        resp = await client.post(OPEN_ELEVATION_URL, json={"locations": locations})
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    results = (resp.json() or {}).get("results") or []
+    return start, results
+
+
 async def _enrich_elevation_open_elevation(coords: list[dict]) -> list[dict]:
-    """Fill elevation_m on coordinates using Open-Elevation (batch POST)."""
+    """Fill elevation_m on coordinates using Open-Elevation (batch POST, run concurrently
+    and hard-capped — see OPEN_ELEVATION_TOTAL_BUDGET_S)."""
     if not coords:
         return coords
     out = [dict(c) for c in coords]
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            for start in range(0, len(out), OPEN_ELEVATION_BATCH):
-                chunk = out[start : start + OPEN_ELEVATION_BATCH]
-                locations = [
-                    {"latitude": float(c["latitude"]), "longitude": float(c["longitude"])}
-                    for c in chunk
-                ]
-                resp = await client.post(OPEN_ELEVATION_URL, json={"locations": locations})
-                if resp.status_code != 200:
-                    continue
-                results = (resp.json() or {}).get("results") or []
-                for j, r in enumerate(results):
-                    idx = start + j
-                    if idx >= len(out):
-                        break
-                    ele = r.get("elevation")
-                    if isinstance(ele, (int, float)):
-                        out[idx]["elevation_m"] = float(ele)
+        async with httpx.AsyncClient(timeout=OPEN_ELEVATION_BATCH_TIMEOUT) as client:
+            batch_results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        _fetch_open_elevation_batch(client, out, start)
+                        for start in range(0, len(out), OPEN_ELEVATION_BATCH)
+                    )
+                ),
+                timeout=OPEN_ELEVATION_TOTAL_BUDGET_S,
+            )
     except Exception:
         return coords
+
+    for batch in batch_results:
+        if batch is None:
+            continue
+        start, results = batch
+        for j, r in enumerate(results):
+            idx = start + j
+            if idx >= len(out):
+                break
+            ele = r.get("elevation")
+            if isinstance(ele, (int, float)):
+                out[idx]["elevation_m"] = float(ele)
     return out
 
 
