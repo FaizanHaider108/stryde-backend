@@ -66,6 +66,30 @@ OPEN_ELEVATION_TOTAL_BUDGET_S = 5.0
 # that touches it.
 OSRM_TIMEOUT = httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=5.0)
 
+# Route generation fires many concurrent requests to a handful of hosts (GraphHopper, the
+# OSRM public instance, Open-Elevation, Overpass) — a single detour search alone evaluates
+# candidates in batches of up to CANDIDATE_BATCH_SIZE at once. httpx.AsyncClient() is not
+# free to construct: it builds a TLS context and a connection pool, and measured on real
+# hosts that setup can itself take hundreds of milliseconds (worse on Windows, where the
+# stdlib's default SSL context pulls from the OS certificate store). Every call site in this
+# module used to open a brand-new client per request, so a batch of N concurrent requests
+# paid that construction cost N times over before any network I/O even started — on top of
+# losing connection pooling / TLS session reuse across requests to the same host, which
+# matters even more once real network latency is added on top. A single shared, lazily
+# created client removes both costs; per-call timeouts are still passed explicitly to
+# `.get()`/`.post()` so each site keeps its own timeout behavior.
+_shared_http_client: httpx.AsyncClient | None = None
+_shared_http_client_lock = asyncio.Lock()
+
+
+async def _get_shared_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        async with _shared_http_client_lock:
+            if _shared_http_client is None or _shared_http_client.is_closed:
+                _shared_http_client = httpx.AsyncClient()
+    return _shared_http_client
+
 
 def _osrm_route_base(terrain_pref: object | None) -> str:
     """OSRM public instance: bike routing is closer to trail networks when terrain is unpaved."""
@@ -480,7 +504,17 @@ def _offset_point_along_segment(
     dy_km = (end_lat - start_lat) * 111.32
     segment_length_km = math.hypot(dx_km, dy_km)
 
-    if segment_length_km < 0.05:
+    # Only bail out for a genuinely degenerate (near-zero-length) segment, where the
+    # perpendicular direction is undefined and dividing by segment_length_km below would
+    # blow up. This function is only ever reached for real point-to-point requests — a
+    # round-trip request (start == end exactly) is routed to the separate loop-generation
+    # path before candidate building — so start and end are always distinct here, but they
+    # can legitimately be very close (a user tapping two nearby points on a map). The
+    # previous 0.05 km (50 m) cutoff silently dropped the offset entirely for any such pair,
+    # collapsing every detour candidate onto the direct start-end line and making it
+    # structurally impossible to stretch a route to any target distance for closely-spaced
+    # pins — regardless of how large perpendicular_offset_km was supposed to be.
+    if segment_length_km < 0.001:
         return _format_point(base_lat, base_lng)
 
     perp_x = (-dy_km / segment_length_km) * perpendicular_offset_km * side
@@ -576,17 +610,20 @@ async def _request_osrm_route_for_points(points: list[str], terrain_pref: object
 
     # This is the hottest OSRM call site — every candidate route, both point-to-point and
     # loop fallback, goes through it — so a short, explicit connect timeout matters most
-    # here (see OSRM_TIMEOUT). The public instance occasionally refuses a connection outright
-    # (vs. just being slow) under load; one quick retry absorbs that without letting a bare
-    # httpx.ConnectError escape uncaught and turn into a 500 for the whole route request.
-    async with httpx.AsyncClient(timeout=OSRM_TIMEOUT) as client:
-        try:
-            response = await client.get(url, params=params)
-        except httpx.ConnectError:
-            await asyncio.sleep(0.5)
-            response = await client.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
+    # here (see OSRM_TIMEOUT). The public instance both refuses connections outright under
+    # load (httpx.ConnectError) and, just as often in practice, accepts the TCP handshake
+    # too slowly to beat OSRM_TIMEOUT's connect deadline (httpx.ConnectTimeout — a sibling
+    # exception, NOT a subclass of ConnectError, so it needs its own except arm). One quick
+    # retry absorbs either without letting it escape uncaught and turn into a 500 for the
+    # whole route request.
+    client = await _get_shared_http_client()
+    try:
+        response = await client.get(url, params=params, timeout=OSRM_TIMEOUT)
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        await asyncio.sleep(0.5)
+        response = await client.get(url, params=params, timeout=OSRM_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
 
     routes = data.get("routes") or []
     if not routes:
@@ -623,10 +660,10 @@ async def _request_osrm_nearest(
     params = {"number": 1}
 
     try:
-        async with httpx.AsyncClient(timeout=OSRM_TIMEOUT) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
+        client = await _get_shared_http_client()
+        response = await client.get(url, params=params, timeout=OSRM_TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
     except Exception:
         return None
 
@@ -659,10 +696,10 @@ async def _snap_to_nearest_walkable_node(
     url = f"{base}/{lng},{lat}"
     params = {"number": 1}
     try:
-        async with httpx.AsyncClient(timeout=OSRM_TIMEOUT) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+        client = await _get_shared_http_client()
+        resp = await client.get(url, params=params, timeout=OSRM_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception:
         return lat, lng
 
@@ -724,7 +761,9 @@ async def _fetch_open_elevation_batch(
         {"latitude": float(c["latitude"]), "longitude": float(c["longitude"])} for c in chunk
     ]
     try:
-        resp = await client.post(OPEN_ELEVATION_URL, json={"locations": locations})
+        resp = await client.post(
+            OPEN_ELEVATION_URL, json={"locations": locations}, timeout=OPEN_ELEVATION_BATCH_TIMEOUT
+        )
     except Exception:
         return None
     if resp.status_code != 200:
@@ -740,16 +779,16 @@ async def _enrich_elevation_open_elevation(coords: list[dict]) -> list[dict]:
         return coords
     out = [dict(c) for c in coords]
     try:
-        async with httpx.AsyncClient(timeout=OPEN_ELEVATION_BATCH_TIMEOUT) as client:
-            batch_results = await asyncio.wait_for(
-                asyncio.gather(
-                    *(
-                        _fetch_open_elevation_batch(client, out, start)
-                        for start in range(0, len(out), OPEN_ELEVATION_BATCH)
-                    )
-                ),
-                timeout=OPEN_ELEVATION_TOTAL_BUDGET_S,
-            )
+        client = await _get_shared_http_client()
+        batch_results = await asyncio.wait_for(
+            asyncio.gather(
+                *(
+                    _fetch_open_elevation_batch(client, out, start)
+                    for start in range(0, len(out), OPEN_ELEVATION_BATCH)
+                )
+            ),
+            timeout=OPEN_ELEVATION_TOTAL_BUDGET_S,
+        )
     except Exception:
         return coords
 
@@ -963,17 +1002,17 @@ async def _request_graphhopper_route_for_points(
         "custom_model": json.dumps(_build_graphhopper_custom_model(payload)),
     }
 
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, params=params_with_custom_model)
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPStatusError as exc:
-            if not _is_graphhopper_flexible_mode_rejection(exc):
-                raise
-            response = await client.get(url, params=base_params)
-            response.raise_for_status()
-            data = response.json()
+    client = await _get_shared_http_client()
+    try:
+        response = await client.get(url, params=params_with_custom_model)
+        response.raise_for_status()
+        data = response.json()
+    except httpx.HTTPStatusError as exc:
+        if not _is_graphhopper_flexible_mode_rejection(exc):
+            raise
+        response = await client.get(url, params=base_params)
+        response.raise_for_status()
+        data = response.json()
 
     if not data.get("paths"):
         raise HTTPException(
@@ -1023,17 +1062,17 @@ async def _request_graphhopper_distance_constrained_route(
         "custom_model": json.dumps(_build_graphhopper_custom_model(payload)),
     }
 
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, params=params_with_custom_model)
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPStatusError as exc:
-            if not _is_graphhopper_flexible_mode_rejection(exc):
-                raise
-            response = await client.get(url, params=base_params)
-            response.raise_for_status()
-            data = response.json()
+    client = await _get_shared_http_client()
+    try:
+        response = await client.get(url, params=params_with_custom_model)
+        response.raise_for_status()
+        data = response.json()
+    except httpx.HTTPStatusError as exc:
+        if not _is_graphhopper_flexible_mode_rejection(exc):
+            raise
+        response = await client.get(url, params=base_params)
+        response.raise_for_status()
+        data = response.json()
 
     paths = data.get("paths") or []
     if not paths:
@@ -1078,6 +1117,92 @@ async def _request_graphhopper_distance_constrained_route(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="GRAPHOPPER_ROUTE_TOO_SHORT",
     )
+
+
+# Concurrency + time budget for the GraphHopper-backed point-to-point detour search
+# (_request_graphhopper_detour_route). GraphHopper is a reliably hosted, paid API — unlike
+# the public OSRM demo instance (routing.openstreetmap.de) used for the OSRM candidate
+# search, which has no uptime guarantee and is what actually made most short point-to-point
+# requests fail or hang: GraphHopper's native alternative_route rarely stretches far past
+# the direct distance between two pins, so anything more than a small detour used to fall
+# straight through to OSRM. Batching here mirrors CANDIDATE_BATCH_SIZE; the budget is a
+# safety net, not the expected case, since GraphHopper itself is fast and reliable.
+GRAPHHOPPER_DETOUR_BATCH_SIZE = 24
+GRAPHHOPPER_DETOUR_SEARCH_BUDGET_S = 12.0
+
+
+async def _request_graphhopper_detour_route(
+    payload: RouteCreate,
+    gh_profile: str,
+    direct_route_distance_km: float,
+) -> dict:
+    """
+    GraphHopper-backed detour search for point-to-point routes: stretches a route between
+    two pins out to the requested distance by routing through synthetic offset waypoints —
+    the same candidate geometry _request_osrm_distance_constrained_route uses for its OSRM
+    search (_build_detour_candidate_point_sets), evaluated against GraphHopper's own routing
+    API instead of the flaky public OSRM demo instance.
+
+    This is the tier that makes short point-to-point requests (e.g. "1 km between these two
+    nearby pins") reliable: GraphHopper's native alternative_route (tried before this, see
+    _request_graphhopper_distance_constrained_route) rarely finds an alternative that
+    stretches far past the direct route, so it fails that case constantly. Previously the
+    only way to stretch a route out to a target distance was OSRM — giving point-to-point
+    routes the same kind of GraphHopper-only redundancy loop routes already have via
+    _request_graphhopper_waypoint_loop_route, before ever depending on OSRM.
+    """
+    target_km = float(payload.distance_km)
+    tol = _distance_tolerance_km(target_km)
+    raw_candidates = _build_detour_candidate_point_sets(payload, direct_route_distance_km)
+
+    best_route: Optional[dict] = None
+    best_key: tuple = (9, 0.0, 0.0, 0.0)
+
+    async def evaluate_one(raw_candidate: list[str]) -> dict | None:
+        try:
+            return await _request_graphhopper_route_for_points(raw_candidate, payload, gh_profile)
+        except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
+            return None
+
+    async def _run_search() -> None:
+        nonlocal best_route, best_key
+        for start in range(0, len(raw_candidates), GRAPHHOPPER_DETOUR_BATCH_SIZE):
+            batch = raw_candidates[start : start + GRAPHHOPPER_DETOUR_BATCH_SIZE]
+            batch_results = await asyncio.gather(*(evaluate_one(c) for c in batch))
+
+            for candidate_route in batch_results:
+                if candidate_route is None:
+                    continue
+
+                d = candidate_route["distance_km"]
+                meets = _route_meets_target_length(d, target_km)
+                gap = abs(d - target_km) if meets else 0.0
+                if meets:
+                    cap = target_km + _distance_max_overshoot_km(target_km)
+                    over = max(0.0, d - cap)
+                    key = (0, gap, over, _route_backtrack_penalty(candidate_route["map_data"]) * 0.02)
+                else:
+                    key = (1, -d, 0.0, 0.0)
+
+                if best_route is None or key < best_key:
+                    best_route = candidate_route
+                    best_key = key
+
+            if best_route is not None and best_key[0] == 0 and best_key[1] <= tol:
+                return
+
+    try:
+        await asyncio.wait_for(_run_search(), timeout=GRAPHHOPPER_DETOUR_SEARCH_BUDGET_S)
+    except asyncio.TimeoutError:
+        pass
+
+    if best_route is None or not _route_meets_target_length(best_route["distance_km"], target_km):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GRAPHOPPER_DETOUR_TOO_SHORT",
+        )
+
+    return best_route
 
 
 async def _request_graphhopper_loop_route(
@@ -1125,8 +1250,8 @@ async def _request_graphhopper_loop_route(
         # slower fallback tiers for no reason.
         return _route_dict_from_graphhopper_path(paths[0])
 
-    async with httpx.AsyncClient() as client:
-        candidates = await asyncio.gather(*(request_seed(client, seed) for seed in seeds))
+    client = await _get_shared_http_client()
+    candidates = await asyncio.gather(*(request_seed(client, seed) for seed in seeds))
 
     valid_candidates = [c for c in candidates if c is not None]
     if not valid_candidates:
@@ -1293,12 +1418,13 @@ async def _snap_waypoints_via_overpass(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=11.0) as client:
-            resp = await client.post(
-                "https://overpass-api.de/api/interpreter",
-                data={"data": query},
-            )
-            resp.raise_for_status()
+        client = await _get_shared_http_client()
+        resp = await client.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": query},
+            timeout=11.0,
+        )
+        resp.raise_for_status()
 
         elements = [e for e in resp.json().get("elements", []) if "center" in e]
         if not elements:
@@ -1507,6 +1633,91 @@ async def _finalize_route_options(routes: list[dict]) -> list[dict]:
     return list(await asyncio.gather(*(_finalize_route_geometry(r) for r in routes)))
 
 
+async def generate_point_to_point_route(
+    payload: RouteCreate,
+    gh_profile: str,
+    start_pt: str,
+    end_pt: str,
+) -> list[dict]:
+    """Single entry point for point-to-point route generation: a start pin, an end pin, and
+    a target distance in, a ranked list of routes between them out. Three tiers, each only
+    tried if the previous one can't reach the target distance — mirrors the fallback design
+    in generate_loop_route:
+
+    1. GraphHopper's native alternative_route algorithm
+       (_request_graphhopper_distance_constrained_route) — up to 8 real alternatives from
+       GraphHopper's own engine in a single request. Succeeds whenever the requested
+       distance is reasonably close to the direct distance between the pins.
+    2. GraphHopper's ordinary multi-point routing walked through synthetic offset waypoints
+       between start and end (_request_graphhopper_detour_route) — the same detour-candidate
+       geometry the OSRM tier below uses, evaluated against GraphHopper instead. This is the
+       tier that makes short requests (e.g. "1 km between these two nearby pins") reliable:
+       tier 1 rarely stretches far past the direct route, so it fails that case constantly.
+       Previously the *only* way to stretch a route out to a target distance was OSRM (tier
+       3) — a public demo instance with no uptime guarantee, which made it the single
+       biggest source of point-to-point failures and multi-minute hangs even for short,
+       easy-looking requests. Routing the same detour geometry through GraphHopper first
+       gives point-to-point the same GraphHopper-only redundancy loop routes already have
+       (see _request_graphhopper_waypoint_loop_route) before ever depending on OSRM.
+    3. OSRM's candidate search (_request_osrm_distance_constrained_route) — tried last, only
+       when GraphHopper isn't configured or every GraphHopper tier fails outright.
+    """
+    if not GRAPHHOPPER_API_KEY:
+        return [await _request_osrm_distance_constrained_route(payload)]
+
+    fallback_error_detail: Optional[str] = None
+    try:
+        return await _request_graphhopper_distance_constrained_route(payload, gh_profile, start_pt, end_pt)
+    except HTTPException as exc:
+        fallback_error_detail = str(exc.detail)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in {401, 403}:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Route generation requires a valid GraphHopper API key.",
+            ) from exc
+        fallback_error_detail = _extract_graphhopper_error_detail(exc)
+    except httpx.RequestError as exc:
+        fallback_error_detail = f"Error connecting to GraphHopper API: {str(exc)}"
+
+    # The detour search only needs a rough baseline distance to size its offset candidates
+    # (see _build_detour_candidate_point_sets) — it tries many scales, so precision here
+    # isn't critical. A failure of just this baseline lookup (network blip, self-intersect
+    # on a degenerate 2-point path, etc.) shouldn't cost us the whole GraphHopper detour
+    # tier; fall back to the straight-line geo distance and still attempt it.
+    try:
+        direct_route = await _request_graphhopper_route_for_points([start_pt, end_pt], payload, gh_profile)
+        direct_route_distance_km = direct_route["distance_km"]
+    except (httpx.RequestError, httpx.HTTPStatusError, HTTPException):
+        direct_route_distance_km = _haversine_distance_km(
+            payload.start_lat, payload.start_lng, payload.end_lat, payload.end_lng
+        )
+
+    try:
+        best = await _request_graphhopper_detour_route(payload, gh_profile, direct_route_distance_km)
+        return [best]
+    except HTTPException as detour_exc:
+        fallback_error_detail = f"{fallback_error_detail}. {detour_exc.detail}"
+    except httpx.RequestError as exc:
+        fallback_error_detail = f"{fallback_error_detail}. GraphHopper detour search failed: {str(exc)}"
+    except httpx.HTTPStatusError as exc:
+        fallback_error_detail = (
+            f"{fallback_error_detail}. GraphHopper detour search failed: {_extract_graphhopper_error_detail(exc)}"
+        )
+
+    # Every GraphHopper tier failed (or GraphHopper itself errored) — OSRM is the last
+    # resort, not the primary strategy, precisely because it depends on a public demo
+    # instance with no uptime guarantee.
+    try:
+        osrm_result = await _request_osrm_distance_constrained_route(payload)
+        return [osrm_result]
+    except HTTPException as osrm_exc:
+        raise HTTPException(
+            status_code=osrm_exc.status_code,
+            detail=f"{fallback_error_detail}. OSRM fallback also failed: {osrm_exc.detail}",
+        ) from osrm_exc
+
+
 async def create_route(payload: RouteCreate, creator: User) -> list[dict]:
     if not creator or not creator.uid:
         raise HTTPException(status_code=401, detail="User not authenticated")
@@ -1547,52 +1758,11 @@ async def create_route(payload: RouteCreate, creator: User) -> list[dict]:
         loop_results = await generate_loop_route(normalized_payload, gh_profile, start_pt)
         return await _finalize_route_options(loop_results)
 
-    if GRAPHHOPPER_API_KEY:
-        fallback_error_detail: Optional[str] = None
-        try:
-            gh_results = await _request_graphhopper_distance_constrained_route(
-                normalized_payload, gh_profile, start_pt, end_pt
-            )
-            return await _finalize_route_options(gh_results)
-        except HTTPException as exc:
-            if str(exc.detail) == "GRAPHOPPER_ROUTE_TOO_SHORT":
-                try:
-                    osrm_result = await _request_osrm_distance_constrained_route(normalized_payload)
-                    return await _finalize_route_options([osrm_result])
-                except HTTPException as osrm_exc:
-                    raise HTTPException(
-                        status_code=osrm_exc.status_code,
-                        detail=(
-                            f"Could not build a route close to your requested "
-                            f"{float(payload.distance_km):.1f} km. {osrm_exc.detail}"
-                        ),
-                    ) from osrm_exc
-            fallback_error_detail = str(exc.detail)
-        except httpx.RequestError as exc:
-            fallback_error_detail = f"Error connecting to GraphHopper API: {str(exc)}"
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in {401, 403}:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Route generation requires a valid GraphHopper API key.",
-                ) from exc
-            fallback_error_detail = _extract_graphhopper_error_detail(exc)
-
-        # GraphHopper can fail in dense/local-road areas; fallback to OSRM keeps
-        # route generation available for street-level routing.
-        try:
-            osrm_result = await _request_osrm_distance_constrained_route(normalized_payload)
-            return await _finalize_route_options([osrm_result])
-        except HTTPException as osrm_exc:
-            if fallback_error_detail:
-                raise HTTPException(
-                    status_code=osrm_exc.status_code,
-                    detail=f"{fallback_error_detail}. OSRM fallback also failed: {osrm_exc.detail}",
-                ) from osrm_exc
-            raise
-
-    osrm_only = await _request_osrm_distance_constrained_route(normalized_payload)
-    return await _finalize_route_options([osrm_only])
+    # Dedicated point-to-point path — GraphHopper's native alternative_route first, then a
+    # GraphHopper-backed detour search, OSRM candidate search only as a last resort. See
+    # generate_point_to_point_route.
+    p2p_results = await generate_point_to_point_route(normalized_payload, gh_profile, start_pt, end_pt)
+    return await _finalize_route_options(p2p_results)
 
 
 def save_route(db: Session, creator: User, payload: RouteSave) -> Route:
