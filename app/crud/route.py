@@ -576,9 +576,15 @@ async def _request_osrm_route_for_points(points: list[str], terrain_pref: object
 
     # This is the hottest OSRM call site — every candidate route, both point-to-point and
     # loop fallback, goes through it — so a short, explicit connect timeout matters most
-    # here (see OSRM_TIMEOUT).
+    # here (see OSRM_TIMEOUT). The public instance occasionally refuses a connection outright
+    # (vs. just being slow) under load; one quick retry absorbs that without letting a bare
+    # httpx.ConnectError escape uncaught and turn into a 500 for the whole route request.
     async with httpx.AsyncClient(timeout=OSRM_TIMEOUT) as client:
-        response = await client.get(url, params=params)
+        try:
+            response = await client.get(url, params=params)
+        except httpx.ConnectError:
+            await asyncio.sleep(0.5)
+            response = await client.get(url, params=params)
         response.raise_for_status()
         data = response.json()
 
@@ -774,7 +780,17 @@ async def _request_osrm_route(payload: RouteCreate) -> dict:
 
 async def _request_osrm_distance_constrained_route(payload: RouteCreate) -> dict:
     terrain_pref = getattr(payload, "terrain", None)
-    direct_route = await _request_osrm_route(payload)
+    try:
+        direct_route = await _request_osrm_route(payload)
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        # Every create_route call site that reaches this function either already only
+        # catches HTTPException (the GraphHopper-failed and route-too-short fallbacks) or
+        # catches nothing at all (the no-GraphHopper-key path) — a raw httpx exception here
+        # previously escaped uncaught and surfaced to the client as an unhandled 500.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Routing service is temporarily unreachable. Please try again in a moment.",
+        ) from exc
     target_km = float(payload.distance_km)
     tol = _distance_tolerance_km(target_km)
 
